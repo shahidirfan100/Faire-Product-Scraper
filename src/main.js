@@ -9,22 +9,57 @@ const PROCESSED_URLS = new Set();
 function normalizeProductRecord(p) {
     if (!p || typeof p !== 'object') return null;
 
-    const token = p?.token || p?.id || p?.productToken || p?.slug;
+    // Try all possible ID fields
+    const token = p.token || p.id || p.productToken || p.product_token || p.slug;
     if (!token) return null;
 
-    const brandToken = p?.brand?.token || p?.brandToken || p?.brand?.slug || '';
+    // Brand extraction
+    const brandObj = p.brand || {};
+    const brandName = brandObj.name || p.brandName || p.brand_name || '';
+    const brandToken = brandObj.token || p.brandToken || p.brand_token || brandObj.slug || '';
+    const brandUrl = brandToken ? `https://www.faire.com/brand/${brandToken}` : '';
+
+    // Image extraction - try arrays, objects, and flat fields
+    let imageUrl = null;
+    if (Array.isArray(p.images) && p.images.length > 0) {
+        imageUrl = p.images[0]?.url || p.images[0]?.src || p.images[0]; // Sometimes plain string
+    }
+    if (!imageUrl && p.image) {
+        imageUrl = typeof p.image === 'object' ? (p.image.url || p.image.src) : p.image;
+    }
+    if (!imageUrl) {
+        imageUrl = p.imageUrl || p.image_url || p.thumbnail || p.thumbnailUrl || p.thumbnail_url || p.tile_image?.url;
+    }
+    // Normalize image URL (sometimes relative or missing protocol)
+    if (imageUrl && typeof imageUrl === 'string' && !imageUrl.startsWith('http')) {
+        // Faire sometimes uses relative paths or protocol-less
+        if (imageUrl.startsWith('//')) imageUrl = `https:${imageUrl}`;
+    }
+
+    // Price extraction
+    const priceObj = p.price || {};
+    const wholesaleCents = priceObj.wholesale_price_cents || p.wholesale_price_cents || p.wholesalePriceCents || 0;
+    const retailCents = priceObj.retail_price_cents || p.retail_price_cents || p.retailPriceCents || 0;
+
+    // Check completeness
+    const isComplete = !!(brandName && imageUrl && token);
+
+    // DEBUG: Log first incomplete product to help user debug
+    if (!isComplete && Math.random() < 0.01) { // Log 1% of incomplete to avoid spam
+        console.log(`[DEBUG] Incomplete product data: Token=${token}, Brand=${brandName}, Image=${!!imageUrl}. Keys: ${Object.keys(p).join(',')}`);
+    }
 
     return {
         productUrl: `https://www.faire.com/product/${token}`,
-        productName: p?.name || p?.title || p?.productName || '',
-        brandName: p?.brand?.name || p?.brandName || '',
+        productName: p.name || p.title || p.productName || p.product_name || '',
+        brandName: brandName,
         brandToken: brandToken,
-        brandUrl: brandToken ? `https://www.faire.com/brand/${brandToken}` : '',
-        imageUrl: p?.images?.[0]?.url || p?.image?.url || p?.imageUrl || null,
-        wholesalePriceCents: p?.price?.wholesale_price_cents || p?.wholesale_price_cents || p?.wholesalePriceCents || 0,
-        retailPriceCents: p?.price?.retail_price_cents || p?.retail_price_cents || p?.retailPriceCents || 0,
-        badges: p?.badges || p?.tags || [],
-        _hasCompleteData: !!(p?.brand?.name && (p?.images?.[0]?.url || p?.image?.url) && token), // Flag for skipping detail fetch
+        brandUrl: brandUrl,
+        imageUrl: imageUrl,
+        wholesalePriceCents: wholesaleCents,
+        retailPriceCents: retailCents,
+        badges: p.badges || p.tags || [],
+        _hasCompleteData: isComplete
     };
 }
 
