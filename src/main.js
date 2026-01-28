@@ -100,21 +100,26 @@ async function main() {
             if (totalCollected >= RESULTS_WANTED) return;
             log.info(`Processing listing: ${request.url}`);
 
-            const interceptedProducts = [];
+            const allProducts = [];
 
-            // Setup usage of API interception
-            page.on('response', async (response) => {
-                const url = response.url();
-                if (url.includes('/api/v3/search/products') || url.includes('/api/v3/layout/search-product-tiles')) {
+            // Setup route-based API interception with proper response storage
+            await page.route('**/api/v3/**', async (route) => {
+                const response = await route.fetch();
+                const url = route.request().url();
+
+                if (url.includes('/search/products') || url.includes('/search-product-tiles')) {
                     try {
-                        const json = await response.json();
+                        const body = await response.text();
+                        const json = JSON.parse(body);
                         const products = json.products || json.product_tiles || json.results;
+
                         if (products && Array.isArray(products)) {
-                            log.info(`Intercepted API response with ${products.length} products`);
+                            log.info(`✅ Captured API response with ${products.length} products`);
                             for (const p of products) {
                                 const token = p.token || p.id;
                                 if (!token) continue;
-                                interceptedProducts.push({
+
+                                allProducts.push({
                                     productUrl: `https://www.faire.com/product/${token}`,
                                     productName: p.name || p.title || '',
                                     brandName: p.brand?.name || '',
@@ -127,91 +132,54 @@ async function main() {
                                 });
                             }
                         }
+
+                        await route.fulfill({ response });
                     } catch (e) {
-                        // ignore non-json or errors
+                        await route.fulfill({ response });
                     }
+                } else {
+                    await route.fulfill({ response });
                 }
             });
 
-            // Initial Wait
-            try {
-                // Wait for either the API or the grid to ensure page load
-                await Promise.race([
-                    page.waitForResponse(res => res.url().includes('/api/v3/'), { timeout: 30000 }),
-                    page.waitForSelector('a[href*="product="]', { timeout: 30000 })
-                ]);
-            } catch (e) {
-                log.warning('Initial wait timeout - attempting scroll anyway');
-            }
-
-            // Check __NEXT_DATA__ first as a fast path
-            const nextDataProducts = await extractNextData(page);
-            if (nextDataProducts && nextDataProducts.length > 0) {
-                log.info(`✅ Found ${nextDataProducts.length} products via __NEXT_DATA__`);
-                interceptedProducts.push(...nextDataProducts);
-            }
-
-            let processingQueue = [];
-            let noNewDataCount = 0;
-
-            // Wait for initial API response to populate
-            log.info('Waiting for initial API data...');
+            // Wait for page and initial API call
             await page.waitForTimeout(3000);
+            log.info(`After initial wait: ${allProducts.length} products captured`);
 
-            log.info(`After wait, interceptedProducts has ${interceptedProducts.length} items`);
-
-            // Main loop: Scroll -> Wait -> Process Intercepted -> Check Done
-            while (totalCollected < RESULTS_WANTED) {
-                log.info(`Loop start: interceptedProducts=${interceptedProducts.length}, processingQueue=${processingQueue.length}, totalCollected=${totalCollected}`);
-
-                // Transfer from intercept buffer to processing queue (deduplicated)
-                while (interceptedProducts.length > 0) {
-                    const item = interceptedProducts.shift();
-                    // Local simple dedupe for this run
-                    if (!PROCESSED_URLS.has(item.productUrl)) {
-                        processingQueue.push(item);
-                        PROCESSED_URLS.add(item.productUrl);
-                    }
-                }
-
-                log.info(`After transfer: processingQueue=${processingQueue.length}`);
-
-                // If we have items to process, do it
-                if (processingQueue.length > 0) {
-                    const needed = RESULTS_WANTED - totalCollected;
-                    const batch = processingQueue.slice(0, needed);
-                    processingQueue = processingQueue.slice(needed); // keep remainder
-
-                    if (batch.length > 0) {
-                        log.info(`Processing batch of ${batch.length} products...`);
-                        const detailResults = await fetchDetailsInBatches(batch, cookies, proxyInfo?.url);
-                        if (detailResults.length > 0) {
-                            await Dataset.pushData(detailResults);
-                            totalCollected += detailResults.length;
-                            log.info(`Total collected: ${totalCollected} / ${RESULTS_WANTED}`);
-                        }
-                        noNewDataCount = 0; // Reset stall counter
-                    }
-                } else {
-                    noNewDataCount++;
-                    log.info(`No items in queue, noNewDataCount=${noNewDataCount}`);
-                }
-
-                if (totalCollected >= RESULTS_WANTED) break;
-
-                // Stop if we haven't seen new data for a while
-                if (noNewDataCount > 3) {
-                    log.info('No new products found after multiple scrolls. Stopping.');
-                    break;
-                }
-
-                // Scroll to trigger more API calls
+            // Scroll to load more
+            for (let i = 0; i < 3 && allProducts.length < RESULTS_WANTED; i++) {
                 await autoScroll(page);
-                await page.waitForTimeout(3000); // Increased wait for network responses
+                await page.waitForTimeout(2000);
+                log.info(`After scroll ${i + 1}: ${allProducts.length} products total`);
+            }
+
+            // Process captured products
+            if (allProducts.length === 0) {
+                log.warning('No products captured from API. Exiting.');
+                return;
+            }
+
+            // Deduplicate
+            const uniqueProducts = [];
+            const seen = new Set();
+            for (const product of allProducts) {
+                if (!seen.has(product.productUrl)) {
+                    seen.add(product.productUrl);
+                    uniqueProducts.push(product);
+                }
+            }
+
+            log.info(`Processing ${uniqueProducts.length} unique products (${RESULTS_WANTED} requested)`);
+            const toProcess = uniqueProducts.slice(0, RESULTS_WANTED);
+
+            // Fetch details and save
+            const results = await fetchDetailsInBatches(toProcess, cookies, proxyInfo?.url);
+            if (results.length > 0) {
+                await Dataset.pushData(results);
+                totalCollected += results.length;
             }
 
             log.info(`✅ Scraping finished. Total products collected: ${totalCollected}`);
-            await Actor.exit();
         }
     });
 
