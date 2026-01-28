@@ -3,10 +3,9 @@ import { PlaywrightCrawler, Dataset } from 'crawlee';
 import { gotScraping } from 'got-scraping';
 import { load } from 'cheerio';
 
-const DETAIL_PAGE_CONCURRENCY = 5; // Reduced for better reliability
-const MAX_SCROLL_HEIGHT = 20000; // Increased for more results
+const DETAIL_PAGE_CONCURRENCY = 5;
+const PROCESSED_URLS = new Set();
 
-// Enhanced stealth script
 const STEALTH_SCRIPT = () => {
     Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
     Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5] });
@@ -34,14 +33,9 @@ async function main() {
         startUrl = `https://www.faire.com/search?q=${encodeURIComponent(searchQuery)}`;
     }
 
-    // Fallback for local testing if input is not picked up
     if (!startUrl) {
         log.warning('No startUrl or searchQuery in input, using default for testing.');
         startUrl = 'https://www.faire.com/search?q=candles';
-    }
-
-    if (!startUrl) {
-        throw new Error('Please provide a startUrl or searchQuery.');
     }
 
     const RESULTS_WANTED = Number.isFinite(+resultsWanted) ? Math.max(1, +resultsWanted) : 20;
@@ -56,7 +50,7 @@ async function main() {
 
     const crawler = new PlaywrightCrawler({
         proxyConfiguration,
-        maxRequestRetries: 5, // Increased retries
+        maxRequestRetries: 5,
         maxConcurrency: 1,
         useSessionPool: true,
         sessionPoolOptions: {
@@ -106,163 +100,114 @@ async function main() {
             if (totalCollected >= RESULTS_WANTED) return;
             log.info(`Processing listing: ${request.url}`);
 
-            // Add human-like delay before interaction
-            await page.waitForTimeout(2000 + Math.random() * 2000);
+            const interceptedProducts = [];
 
-            // Check for blocking
-            const pageTitle = await page.title().catch(() => '');
-            log.info(`Page title: ${pageTitle}`);
+            // Setup usage of API interception
+            page.on('response', async (response) => {
+                const url = response.url();
+                if (url.includes('/api/v3/search/products') || url.includes('/api/v3/layout/search-product-tiles')) {
+                    try {
+                        const json = await response.json();
+                        const products = json.products || json.product_tiles || json.results;
+                        if (products && Array.isArray(products)) {
+                            log.info(`Intercepted API response with ${products.length} products`);
+                            for (const p of products) {
+                                const token = p.token || p.id;
+                                if (!token) continue;
+                                interceptedProducts.push({
+                                    productUrl: `https://www.faire.com/product/${token}`,
+                                    productName: p.name || p.title || '',
+                                    brandName: p.brand?.name || '',
+                                    brandUrl: p.brand?.token ? `https://www.faire.com/brand/${p.brand?.token}` : '',
+                                    imageUrl: p.images?.[0]?.url || p.image?.url || null,
+                                    wholesalePrice: p.price?.wholesale_price_cents ? `$${(p.price.wholesale_price_cents / 100).toFixed(2)}` : '',
+                                    msrp: p.price?.retail_price_cents ? `$${(p.price.retail_price_cents / 100).toFixed(2)}` : '',
+                                    isBestseller: p.badges?.includes('bestseller') || false,
+                                    isNew: p.badges?.includes('new') || false
+                                });
+                            }
+                        }
+                    } catch (e) {
+                        // ignore non-json or errors
+                    }
+                }
+            });
 
-            if (pageTitle.includes('Access Denied') || pageTitle.includes('Captcha') || pageTitle.includes('Challenge')) {
-                log.error('⚠️ BLOCKED! Site detected bot behavior. Saving debug page...');
-                const html = await page.content();
-                await Actor.setValue('debug-blocked', html, { contentType: 'text/html' });
-                throw new Error('Blocked by anti-bot protection');
+            // Initial Wait
+            try {
+                // Wait for either the API or the grid to ensure page load
+                await Promise.race([
+                    page.waitForResponse(res => res.url().includes('/api/v3/'), { timeout: 30000 }),
+                    page.waitForSelector('a[href*="product="]', { timeout: 30000 })
+                ]);
+            } catch (e) {
+                log.warning('Initial wait timeout - attempting scroll anyway');
             }
 
-            // PRIORITY 1: Check for __NEXT_DATA__
+            // Check __NEXT_DATA__ first as a fast path
             const nextDataProducts = await extractNextData(page);
             if (nextDataProducts && nextDataProducts.length > 0) {
                 log.info(`✅ Found ${nextDataProducts.length} products via __NEXT_DATA__`);
-                const itemsNeeded = Math.min(nextDataProducts.length, RESULTS_WANTED - totalCollected);
-                const itemsToProcess = nextDataProducts.slice(0, itemsNeeded);
-
-                const detailResults = await fetchDetailsInBatches(itemsToProcess, cookies, proxyInfo?.url);
-                if (detailResults.length > 0) {
-                    await Dataset.pushData(detailResults);
-                    totalCollected += detailResults.length;
-                    log.info(`Collected ${detailResults.length} products from __NEXT_DATA__. Total: ${totalCollected}`);
-                }
-                return;
+                interceptedProducts.push(...nextDataProducts);
             }
 
-            let currentPageNum = 1;
+            let processingQueue = [];
+            let noNewDataCount = 0;
 
-            // PRIORITY 2: Fallback to DOM scraping with pagination
+            // Main loop: Scroll -> Wait -> Process Intercepted -> Check Done
             while (totalCollected < RESULTS_WANTED) {
-                log.info(`Current URL: ${page.url()}`);
-                try {
-                    // Wait for grid to load with multiple selectors
-                    const gridLoaded = await page.waitForSelector(
-                        'a[href*="product="], [data-testid*="product"], article a',
-                        { timeout: 30000 }
-                    ).catch(() => {
-                        log.warning('⚠️ Product grid timeout, attempting to save debug HTML...');
-                        return null;
-                    });
-
-                    if (!gridLoaded) {
-                        const html = await page.content();
-                        await Actor.setValue('debug-no-products', html, { contentType: 'text/html' });
-                        log.error('No products found. Debug HTML saved.');
-                        break;
+                // Transfer from intercept buffer to processing queue (deduplicated)
+                while (interceptedProducts.length > 0) {
+                    const item = interceptedProducts.shift();
+                    // Local simple dedupe for this run
+                    if (!PROCESSED_URLS.has(item.productUrl)) {
+                        processingQueue.push(item);
+                        PROCESSED_URLS.add(item.productUrl);
                     }
+                }
 
-                    // Auto-scroll to trigger lazy loads
-                    await autoScroll(page);
-                    await page.waitForTimeout(2000); // Let content settle
+                // If we have items to process, do it
+                if (processingQueue.length > 0) {
+                    const needed = RESULTS_WANTED - totalCollected;
+                    const batch = processingQueue.slice(0, needed);
+                    processingQueue = processingQueue.slice(needed); // keep remainder
 
-                    // Extract Product Links from Grid
-                    const remainingWanted = RESULTS_WANTED - totalCollected;
-
-                    // Evaluate page to get all visible product cards with multiple fallback selectors
-                    const productItems = await page.evaluate(() => {
-                        const items = [];
-
-                        // Try multiple selector strategies
-                        const selectors = [
-                            'a[href*="product="]',
-                            'a[href*="/product/"]',
-                            '[data-testid*="product"] a',
-                            'article a',
-                            '[class*="ProductCard"] a',
-                            '[class*="product-card"] a'
-                        ];
-
-                        let productLinks = [];
-                        for (const selector of selectors) {
-                            productLinks = document.querySelectorAll(selector);
-                            if (productLinks.length > 0) {
-                                console.log(`Found ${productLinks.length} products with selector: ${selector}`);
-                                break;
-                            }
+                    if (batch.length > 0) {
+                        log.info(`Processing batch of ${batch.length} products...`);
+                        const detailResults = await fetchDetailsInBatches(batch, cookies, proxyInfo?.url);
+                        if (detailResults.length > 0) {
+                            await Dataset.pushData(detailResults);
+                            totalCollected += detailResults.length;
+                            log.info(`Total collected: ${totalCollected} / ${RESULTS_WANTED}`);
                         }
-
-                        productLinks.forEach(a => {
-                            const url = a.href;
-                            if (!url) return;
-
-                            // Find title and image with multiple strategies
-                            const titleEl = a.querySelector('p, h2, h3, [class*="title"], [class*="Title"]') ||
-                                a.parentElement?.querySelector('p, h2, h3');
-                            const imgEl = a.querySelector('img') || a.parentElement?.querySelector('img');
-
-                            // Extract badges/flags
-                            const container = a.closest('article, [class*="Card"], div');
-                            const badgeText = container?.innerText || '';
-
-                            items.push({
-                                productUrl: url,
-                                productName: titleEl?.innerText?.trim() || '',
-                                imageUrl: imgEl?.src || imgEl?.getAttribute('data-src') || null,
-                                isBestseller: badgeText.toLowerCase().includes('bestseller') || badgeText.includes('🔥'),
-                                isProvenSuccess: badgeText.toLowerCase().includes('proven success'),
-                                isNew: badgeText.toLowerCase().includes('new') && !badgeText.toLowerCase().includes('news')
-                            });
-                        });
-
-                        return items;
-                    });
-
-                    // De-duplicate and filter
-                    const uniqueItems = productItems
-                        .filter((v, i, a) => a.findIndex(t => t.productUrl === v.productUrl) === i)
-                        .filter(item => item.productUrl && item.productName);
-
-                    // Slice to needed
-                    const itemsToProcess = uniqueItems.slice(0, remainingWanted);
-
-                    log.info(`Found ${uniqueItems.length} unique products on page ${currentPageNum}. Processing ${itemsToProcess.length}...`);
-
-                    if (itemsToProcess.length === 0) {
-                        log.warning('No valid products found on this page. Stopping.');
-                        break;
+                        noNewDataCount = 0; // Reset stall counter
                     }
+                } else {
+                    noNewDataCount++;
+                }
 
-                    // Fetch Details using got-scraping in batches
-                    const detailResults = await fetchDetailsInBatches(itemsToProcess, cookies, proxyInfo?.url);
+                if (totalCollected >= RESULTS_WANTED) break;
 
-                    if (detailResults.length > 0) {
-                        await Dataset.pushData(detailResults);
-                        totalCollected += detailResults.length;
-                    }
-
-                    if (totalCollected >= RESULTS_WANTED) break;
-
-                    // Pagination Navigation with multiple strategies
-                    const paginationResult = await navigateToNextPage(page);
-                    if (!paginationResult) {
-                        log.info('No more pages available. End of results.');
-                        break;
-                    }
-
-                    currentPageNum++;
-                    await page.waitForTimeout(2000 + Math.random() * 2000); // Human-like delay
-
-                } catch (e) {
-                    log.error(`Error on page ${currentPageNum}: ${e.message}`);
+                // Stop if we haven't seen new data for a while
+                if (noNewDataCount > 5) {
+                    log.info('No new products found after multiple scrolls. Stopping.');
                     break;
                 }
+
+                // Scroll to trigger more API calls
+                await autoScroll(page);
+                await page.waitForTimeout(2000); // Wait for network
             }
-        },
+
+            log.info(`✅ Scraping finished. Total products collected: ${totalCollected}`);
+            await Actor.exit();
+        }
     });
 
     await crawler.run([startUrl]);
-    log.info(`✅ Scraping finished. Total products collected: ${totalCollected}`);
-    await Actor.exit();
 }
 
-// PRIORITY 1: Extract data from __NEXT_DATA__ (Next.js sites)
+// Extract data from __NEXT_DATA__ (Next.js sites)
 async function extractNextData(page) {
     try {
         const nextDataText = await page.evaluate(() => {
@@ -270,13 +215,9 @@ async function extractNextData(page) {
             return script ? script.textContent : null;
         });
 
-        if (!nextDataText) {
-            log.debug('No __NEXT_DATA__ found');
-            return null;
-        }
+        if (!nextDataText) return null;
 
         const json = JSON.parse(nextDataText);
-        log.debug('__NEXT_DATA__ structure:', Object.keys(json));
 
         // Navigate through common Next.js structures
         const products = json?.props?.pageProps?.products ||
@@ -302,7 +243,6 @@ async function extractNextData(page) {
 
         return null;
     } catch (e) {
-        log.debug(`__NEXT_DATA__ extraction failed: ${e.message}`);
         return null;
     }
 }
@@ -315,7 +255,6 @@ async function fetchDetailsInBatches(items, cookies, proxyUrl) {
         const promises = chunk.map(item => fetchProductDetails(item, cookies, proxyUrl));
         const chunkResults = await Promise.all(promises);
         results.push(...chunkResults.filter(r => r !== null));
-        log.info(`Processed ${Math.min(items.length, i + DETAIL_PAGE_CONCURRENCY)} / ${items.length} details...`);
 
         // Human-like delay between batches
         if (i + DETAIL_PAGE_CONCURRENCY < items.length) {
@@ -325,66 +264,10 @@ async function fetchDetailsInBatches(items, cookies, proxyUrl) {
     return results;
 }
 
-// Navigate to next page with multiple strategies
-async function navigateToNextPage(page) {
-    try {
-        // Strategy 1: Look for Next button with aria-label
-        const nextButton = await page.$('a[aria-label="Next page"], button[aria-label="Next page"], a[aria-label="Next"], button[aria-label="Next"]');
-
-        if (nextButton) {
-            const isDisabled = await nextButton.getAttribute('disabled') !== null;
-            const ariaDisabled = await nextButton.getAttribute('aria-disabled');
-
-            if (isDisabled || ariaDisabled === 'true') {
-                log.info('Next button is disabled. End of results.');
-                return false;
-            }
-
-            log.info('Clicking Next Page button...');
-            await Promise.all([
-                page.waitForLoadState('domcontentloaded', { timeout: 30000 }).catch(() => { }),
-                nextButton.click()
-            ]);
-            return true;
-        }
-
-        // Strategy 2: Look for numbered pagination
-        const currentPage = await page.$('[aria-current="page"]');
-        if (currentPage) {
-            const nextPageLink = await page.$('a[aria-label*="Page"]:not([aria-current])');
-            if (nextPageLink) {
-                log.info('Clicking numbered pagination...');
-                await nextPageLink.click();
-                await page.waitForLoadState('domcontentloaded', { timeout: 30000 }).catch(() => { });
-                return true;
-            }
-        }
-
-        // Strategy 3: URL parameter increment
-        const currentUrl = page.url();
-        const urlObj = new URL(currentUrl);
-        const pageParam = urlObj.searchParams.get('page');
-
-        if (pageParam) {
-            const nextPage = parseInt(pageParam) + 1;
-            urlObj.searchParams.set('page', nextPage.toString());
-            log.info(`Navigating to page ${nextPage} via URL parameter...`);
-            await page.goto(urlObj.toString(), { waitUntil: 'domcontentloaded' });
-            return true;
-        }
-
-        return false;
-    } catch (e) {
-        log.error(`Pagination navigation failed: ${e.message}`);
-        return false;
-    }
-}
-
 async function fetchProductDetails(listingItem, cookies, proxyUrl) {
     const { productUrl, productName: listingName, imageUrl: listingImage, isBestseller, isProvenSuccess, isNew } = listingItem;
 
     try {
-        // Construct Cookie Header
         const cookieHeader = cookies && cookies.length > 0
             ? cookies.map(c => `${c.name}=${c.value}`).join('; ')
             : '';
@@ -396,25 +279,14 @@ async function fetchProductDetails(listingItem, cookies, proxyUrl) {
                 'Cookie': cookieHeader,
                 'Referer': 'https://www.faire.com/',
                 'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-                'Accept-Language': 'en-US,en;q=0.9',
             },
             headerGeneratorOptions: {
-                browsers: [
-                    { name: 'chrome', minVersion: 120, maxVersion: 130 },
-                    { name: 'firefox', minVersion: 115, maxVersion: 125 }
-                ],
+                browsers: [{ name: 'chrome', minVersion: 120 }],
                 devices: ['desktop'],
                 locales: ['en-US'],
-                operatingSystems: ['windows', 'macos'],
+                operatingSystems: ['windows'],
             },
-            retry: {
-                limit: 3,
-                methods: ['GET'],
-                statusCodes: [408, 429, 500, 502, 503, 504],
-            },
-            timeout: {
-                request: 30000,
-            }
+            timeout: { request: 30000 }
         });
 
         const $ = load(response.body);
@@ -423,50 +295,31 @@ async function fetchProductDetails(listingItem, cookies, proxyUrl) {
         const title = $('title').text();
         if (title.includes('Access Denied') || title.includes('Captcha')) {
             log.warning(`Blocked on detail page: ${productUrl}`);
-            return null;
+            return listingItem; // Return basic info at least
         }
 
-        // PRIORITY 1: Try __NEXT_DATA__
-        const nextData = $('script#__NEXT_DATA__').text();
-        if (nextData) {
-            try {
-                const json = JSON.parse(nextData);
-                const productData = json?.props?.pageProps?.product ||
-                    json?.props?.pageProps?.data?.product ||
-                    json?.props?.pageProps?.initialProduct;
-
-                if (productData) {
-                    log.debug('Extracted product from __NEXT_DATA__');
-                    return formatProductData(productData, productUrl, cookies.length > 0);
-                }
-            } catch (e) {
-                log.debug('__NEXT_DATA__ parse failed on detail page');
-            }
-        }
-
-        // PRIORITY 2: Try JSON-LD
+        // Try JSON-LD first
         let jsonLdData = null;
         $('script[type="application/ld+json"]').each((_, el) => {
             try {
                 const json = JSON.parse($(el).text());
                 if (json['@type'] === 'Product') {
                     jsonLdData = json;
-                    return false; // break
+                    return false;
                 }
             } catch { }
         });
 
         if (jsonLdData) {
-            log.debug('Extracted product from JSON-LD');
             return {
                 productName: jsonLdData.name || listingName,
                 brandName: jsonLdData.brand?.name || '',
                 brandUrl: jsonLdData.brand?.url || '',
                 productUrl,
                 imageUrl: jsonLdData.image || listingImage,
-                wholesalePrice: jsonLdData.offers?.price || '',
-                msrp: jsonLdData.offers?.priceSpecification?.price || '',
-                discount: calculateDiscount(jsonLdData.offers?.price, jsonLdData.offers?.priceSpecification?.price),
+                wholesalePrice: jsonLdData.offers?.price || listingItem.wholesalePrice || '',
+                msrp: jsonLdData.offers?.priceSpecification?.price || listingItem.msrp || '',
+                discount: '',
                 isBestseller: isBestseller || false,
                 isProvenSuccess: isProvenSuccess || false,
                 isNew: isNew || false,
@@ -475,174 +328,45 @@ async function fetchProductDetails(listingItem, cookies, proxyUrl) {
             };
         }
 
-        // PRIORITY 3: Fallback to HTML parsing with multiple selectors
-        const productName = $('h1, [data-testid="product-title"], [class*="ProductTitle"]')
-            .first().text().trim() || listingName;
+        // Fallback checks for price if missing
+        let wholesalePrice = listingItem.wholesalePrice;
+        let msrp = listingItem.msrp;
 
-        const brandName = $('a[href^="/brand/"] span, [data-testid="brand-name"], [class*="BrandName"]')
-            .first().text().trim();
-
-        const brandUrl = $('a[href^="/brand/"]').attr('href')
-            ? `https://www.faire.com${$('a[href^="/brand/"]').attr('href')}`
-            : '';
-
-        const imageUrl = $('img[src*="faire"], [data-testid="product-image"] img')
-            .filter((i, el) => $(el).attr('src')?.includes('http'))
-            .first().attr('src') || listingImage;
-
-        // Price extraction with multiple strategies
-        let wholesalePrice = '';
-        let msrp = '';
-
-        // Look for price containers
-        const priceSelectors = [
-            '[data-testid*="price"]',
-            '[class*="Price"]',
-            '[class*="price"]',
-            'span:contains("$")',
-            'div:contains("$")'
-        ];
-
-        let priceElements = [];
-        for (const selector of priceSelectors) {
-            priceElements = $(selector).filter((i, el) => /\$[\d,.]+/.test($(el).text()));
-            if (priceElements.length > 0) break;
+        if (!wholesalePrice && cookies.length > 0) {
+            const wText = $(':contains("Wholesale")').filter((i, el) => /\$\d+/.test($(el).text())).last().text();
+            if (wText) {
+                const m = wText.match(/\$[\d,.]+/);
+                if (m) wholesalePrice = m[0];
+            }
         }
-
-        // Extract prices from text content
-        const allPrices = [];
-        priceElements.each((i, el) => {
-            const text = $(el).text();
-            const matches = text.match(/\$[\d,.]+/g);
-            if (matches) allPrices.push(...matches);
-        });
-
-        // Try to identify wholesale vs retail
-        const bodyText = $('body').text().toLowerCase();
-
-        if (cookies.length > 0) {
-            // Authenticated - look for wholesale price
-            const wholesaleText = $(':contains("Wholesale"), :contains("wholesale")')
-                .filter((i, el) => /\$\d+/.test($(el).text()))
-                .first().text();
-
-            const wholesaleMatch = wholesaleText.match(/\$[\d,.]+/);
-            if (wholesaleMatch) wholesalePrice = wholesaleMatch[0];
-        }
-
-        // Look for MSRP/Retail
-        const msrpText = $(':contains("MSRP"), :contains("Retail"), :contains("retail")')
-            .filter((i, el) => /\$\d+/.test($(el).text()))
-            .first().text();
-
-        const msrpMatch = msrpText.match(/\$[\d,.]+/);
-        if (msrpMatch) msrp = msrpMatch[0];
-
-        // If no specific labels, use first two unique prices
-        const uniquePrices = [...new Set(allPrices)];
-        if (!wholesalePrice && uniquePrices.length > 0) {
-            wholesalePrice = uniquePrices[0] || '';
-        }
-        if (!msrp && uniquePrices.length > 1) {
-            msrp = uniquePrices[1] || '';
-        }
-
-        // Calculate discount
-        const discount = calculateDiscount(wholesalePrice, msrp);
 
         return {
-            productName,
-            brandName,
-            brandUrl,
-            productUrl,
-            imageUrl,
+            ...listingItem,
             wholesalePrice: wholesalePrice || (cookies.length === 0 ? 'Login required' : ''),
             msrp: msrp || '',
-            discount,
-            isBestseller: isBestseller || false,
-            isProvenSuccess: isProvenSuccess || false,
-            isNew: isNew || false,
-            currency: 'USD',
             _scrapedAt: new Date().toISOString()
         };
 
     } catch (e) {
         log.error(`Failed to fetch details for ${productUrl}: ${e.message}`);
-
-        // Return partial data on error
-        return {
-            productName: listingName || 'Error fetching details',
-            brandName: '',
-            brandUrl: '',
-            productUrl,
-            imageUrl: listingItem.imageUrl || '',
-            wholesalePrice: 'Error',
-            msrp: 'Error',
-            discount: '',
-            isBestseller: isBestseller || false,
-            isProvenSuccess: isProvenSuccess || false,
-            isNew: isNew || false,
-            currency: 'USD',
-            _scrapedAt: new Date().toISOString()
-        };
+        return listingItem;
     }
-}
-
-// Format product data from __NEXT_DATA__
-function formatProductData(data, url, isAuthenticated) {
-    return {
-        productName: data.name || data.title || '',
-        brandName: data.brand?.name || data.brandName || '',
-        brandUrl: data.brand?.url || (data.brandToken ? `https://www.faire.com/brand/${data.brandToken}` : ''),
-        productUrl: url,
-        imageUrl: data.imageUrl || data.image || data.thumbnail || '',
-        wholesalePrice: data.wholesalePrice || data.price?.wholesale || (isAuthenticated ? '' : 'Login required'),
-        msrp: data.msrp || data.retailPrice || data.price?.retail || '',
-        discount: calculateDiscount(data.wholesalePrice || data.price?.wholesale, data.msrp || data.retailPrice),
-        isBestseller: data.isBestseller || data.badges?.includes('bestseller') || false,
-        isProvenSuccess: data.isProvenSuccess || data.badges?.includes('proven') || false,
-        isNew: data.isNew || data.badges?.includes('new') || false,
-        currency: data.currency || 'USD',
-        _scrapedAt: new Date().toISOString()
-    };
-}
-
-// Calculate discount percentage
-function calculateDiscount(wholesalePrice, msrp) {
-    if (!wholesalePrice || !msrp) return '';
-
-    try {
-        const wholesale = parseFloat(wholesalePrice.replace(/[^0-9.]/g, ''));
-        const retail = parseFloat(msrp.replace(/[^0-9.]/g, ''));
-
-        if (wholesale && retail && retail > wholesale) {
-            const discount = ((retail - wholesale) / retail * 100).toFixed(0);
-            return `${discount}%`;
-        }
-    } catch (e) {
-        log.debug('Discount calculation failed');
-    }
-
-    return '';
 }
 
 async function autoScroll(page) {
     await page.evaluate(async () => {
         await new Promise((resolve) => {
             let totalHeight = 0;
-            const distance = 400; // Increased scroll distance
-            const maxHeight = 20000; // Increased max height
+            const distance = 400;
             const timer = setInterval(() => {
                 const scrollHeight = document.body.scrollHeight;
                 window.scrollBy(0, distance);
                 totalHeight += distance;
-
-                // Stop if reached bottom or max height
-                if (totalHeight >= scrollHeight - window.innerHeight || totalHeight >= maxHeight) {
+                if (totalHeight >= scrollHeight - window.innerHeight || totalHeight > 20000) {
                     clearInterval(timer);
                     resolve();
                 }
-            }, 150); // Slightly slower scroll for more natural behavior
+            }, 150);
         });
     });
 }
