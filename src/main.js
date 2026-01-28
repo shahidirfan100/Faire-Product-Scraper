@@ -232,9 +232,9 @@ async function main() {
             fingerprintOptions: {
                 fingerprintGeneratorOptions: {
                     browsers: [
-                        { name: 'firefox', minVersion: 120, maxVersion: 130 }
+                        { name: 'firefox' }
                     ],
-                    operatingSystems: ['windows', 'macos'],
+                    operatingSystems: ['windows', 'macos', 'linux'],
                     devices: ['desktop'],
                     locales: ['en-US', 'en'],
                 },
