@@ -158,8 +158,12 @@ async function main() {
             log.info('Waiting for initial API data...');
             await page.waitForTimeout(3000);
 
+            log.info(`After wait, interceptedProducts has ${interceptedProducts.length} items`);
+
             // Main loop: Scroll -> Wait -> Process Intercepted -> Check Done
             while (totalCollected < RESULTS_WANTED) {
+                log.info(`Loop start: interceptedProducts=${interceptedProducts.length}, processingQueue=${processingQueue.length}, totalCollected=${totalCollected}`);
+
                 // Transfer from intercept buffer to processing queue (deduplicated)
                 while (interceptedProducts.length > 0) {
                     const item = interceptedProducts.shift();
@@ -169,6 +173,8 @@ async function main() {
                         PROCESSED_URLS.add(item.productUrl);
                     }
                 }
+
+                log.info(`After transfer: processingQueue=${processingQueue.length}`);
 
                 // If we have items to process, do it
                 if (processingQueue.length > 0) {
@@ -188,6 +194,7 @@ async function main() {
                     }
                 } else {
                     noNewDataCount++;
+                    log.info(`No items in queue, noNewDataCount=${noNewDataCount}`);
                 }
 
                 if (totalCollected >= RESULTS_WANTED) break;
