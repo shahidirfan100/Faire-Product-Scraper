@@ -1,0 +1,69 @@
+[{
+  "actorSpecification": 1,
+  "fields": {},
+  "views": {
+    "overview": {
+      "title": "Overview",
+      "transformation": {
+        "fields": [
+          "productName",
+          "brandName",
+          "wholesalePrice",
+          "msrp",
+          "discount",
+          "isBestseller",
+          "isProvenSuccess",
+          "isNew",
+          "productUrl",
+          "brandUrl"
+        ]
+      },
+      "display": {
+        "component": "table",
+        "properties": {
+          "productName": {
+            "label": "Product Name",
+            "format": "text"
+          },
+          "brandName": {
+            "label": "Brand Name",
+            "format": "text"
+          },
+          "wholesalePrice": {
+            "label": "Wholesale Price (€)",
+            "format": "text"
+          },
+          "msrp": {
+            "label": "MSRP (€)",
+            "format": "text"
+          },
+          "discount": {
+            "label": "Discount",
+            "format": "text"
+          },
+          "isBestseller": {
+            "label": "Bestseller",
+            "format": "boolean"
+          },
+          "isProvenSuccess": {
+            "label": "Proven Success",
+            "format": "boolean"
+          },
+          "isNew": {
+            "label": "New Product",
+            "format": "boolean"
+          },
+          "productUrl": {
+            "label": "Product URL",
+            "format": "link"
+          },
+          "brandUrl": {
+            "label": "Brand URL",
+            "format": "link"
+          }
+        }
+      }
+    }
+  }
+}
+]

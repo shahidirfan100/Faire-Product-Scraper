@@ -1,0 +1,64 @@
+{
+  "title": "Faire Product Scraper",
+  "description": "Fast API-based scraper for Faire.com. Extract wholesale products, brands, and pricing. Supports login cookies to unlock wholesale prices.",
+  "type": "object",
+  "schemaVersion": 1,
+  "properties": {
+    "startUrl": {
+      "title": "Start URL",
+      "type": "string",
+      "description": "Faire category or search URL to scrape. Optional if Search Query is provided.",
+      "editor": "textfield",
+      "default": "https://www.faire.com/search?q=candles",
+      "prefill": "https://www.faire.com/search?q=candles",
+      "pattern": "^https://www\\.faire\\.com/"
+    },
+    "searchQuery": {
+      "title": "Search Query",
+      "type": "string",
+      "description": "Product search term (e.g. 'candles'). Used if Start URL is empty.",
+      "editor": "textfield",
+      "default": "candles",
+      "prefill": "candles"
+    },
+    "resultsWanted": {
+      "title": "Maximum number of products",
+      "type": "integer",
+      "description": "Maximum number of products to collect.",
+      "minimum": 1,
+      "maximum": 10000,
+      "default": 20,
+      "prefill": 20,
+      "editor": "number"
+    },
+    "cookies": {
+      "title": "Login Cookies (for Wholesale Prices)",
+      "type": "array",
+      "description": "Paste your authenticated session cookies here to unlock wholesale pricing. You can get these using a browser extension like 'EditThisCookie' or by inspecting network requests.",
+      "editor": "json",
+      "default": []
+    },
+    "proxyConfiguration": {
+      "title": "Proxy configuration",
+      "type": "object",
+      "description": "Residential proxies recommended for bypassing Cloudflare protection on Faire.",
+      "editor": "proxy",
+      "default": {
+        "useApifyProxy": true,
+        "apifyProxyGroups": [
+          "RESIDENTIAL"
+        ]
+      },
+      "prefill": {
+        "useApifyProxy": true,
+        "apifyProxyGroups": [
+          "RESIDENTIAL"
+        ]
+      }
+    }
+  },
+  "required": [
+    "startUrl"
+  ],
+  "additionalProperties": false
+}
