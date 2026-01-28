@@ -213,23 +213,26 @@ async function main() {
     );
 
     const crawler = new PlaywrightCrawler({
+        launchContext: {
+            launcher: firefox,
+            launchOptions: {
+                headless: true,
+            },
+            userAgent: getRandomUserAgent(),
+        },
         proxyConfiguration,
         maxRequestRetries: 3, // Increased retries for reliability
         maxConcurrency: 1, // Single page at a time for listing pages
         useSessionPool: true,
         sessionPoolOptions: {
-            maxPoolSize: 10, // Increased pool size
+            maxPoolSize: 10,
             sessionOptions: {
-                maxUsageCount: 15, // More uses per session
-                maxErrorScore: 2, // Stricter - retire session faster on errors
+                maxUsageCount: 15,
+                maxErrorScore: 2,
             },
         },
         requestHandlerTimeoutSecs: 180,
         navigationTimeoutSecs: 60,
-
-        browserPoolOptions: {
-            useFingerprints: false,
-        },
 
         preNavigationHooks: [async ({ page, context }) => {
             setupNetworkCapture(page);
@@ -271,7 +274,6 @@ async function main() {
                 await page.context().addCookies(cookies);
             }
 
-            await page.addInitScript(STEALTH_SCRIPT);
             await page.setViewportSize({ width: 1440, height: 900 });
         }],
 
