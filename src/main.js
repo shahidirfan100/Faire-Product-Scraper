@@ -95,7 +95,7 @@ async function main() {
 
             // Inject Cookies if provided
             if (cookies && cookies.length > 0) {
-                await context.addCookies(cookies);
+                await page.context().addCookies(cookies);
             }
 
             await page.addInitScript(STEALTH_SCRIPT);
@@ -126,7 +126,7 @@ async function main() {
                 log.info(`✅ Found ${nextDataProducts.length} products via __NEXT_DATA__`);
                 const itemsNeeded = Math.min(nextDataProducts.length, RESULTS_WANTED - totalCollected);
                 const itemsToProcess = nextDataProducts.slice(0, itemsNeeded);
-                
+
                 const detailResults = await fetchDetailsInBatches(itemsToProcess, cookies, proxyInfo?.url);
                 if (detailResults.length > 0) {
                     await Dataset.pushData(detailResults);
@@ -140,6 +140,7 @@ async function main() {
 
             // PRIORITY 2: Fallback to DOM scraping with pagination
             while (totalCollected < RESULTS_WANTED) {
+                log.info(`Current URL: ${page.url()}`);
                 try {
                     // Wait for grid to load with multiple selectors
                     const gridLoaded = await page.waitForSelector(
@@ -167,7 +168,7 @@ async function main() {
                     // Evaluate page to get all visible product cards with multiple fallback selectors
                     const productItems = await page.evaluate(() => {
                         const items = [];
-                        
+
                         // Try multiple selector strategies
                         const selectors = [
                             'a[href*="product="]',
@@ -189,17 +190,17 @@ async function main() {
 
                         productLinks.forEach(a => {
                             const url = a.href;
-                            if (!url || !url.includes('faire.com')) return;
+                            if (!url) return;
 
                             // Find title and image with multiple strategies
-                            const titleEl = a.querySelector('p, h2, h3, [class*="title"], [class*="Title"]') || 
-                                          a.parentElement?.querySelector('p, h2, h3');
+                            const titleEl = a.querySelector('p, h2, h3, [class*="title"], [class*="Title"]') ||
+                                a.parentElement?.querySelector('p, h2, h3');
                             const imgEl = a.querySelector('img') || a.parentElement?.querySelector('img');
 
                             // Extract badges/flags
                             const container = a.closest('article, [class*="Card"], div');
                             const badgeText = container?.innerText || '';
-                            
+
                             items.push({
                                 productUrl: url,
                                 productName: titleEl?.innerText?.trim() || '',
@@ -209,7 +210,7 @@ async function main() {
                                 isNew: badgeText.toLowerCase().includes('new') && !badgeText.toLowerCase().includes('news')
                             });
                         });
-                        
+
                         return items;
                     });
 
@@ -244,7 +245,7 @@ async function main() {
                         log.info('No more pages available. End of results.');
                         break;
                     }
-                    
+
                     currentPageNum++;
                     await page.waitForTimeout(2000 + Math.random() * 2000); // Human-like delay
 
@@ -278,25 +279,25 @@ async function extractNextData(page) {
         log.debug('__NEXT_DATA__ structure:', Object.keys(json));
 
         // Navigate through common Next.js structures
-        const products = json?.props?.pageProps?.products || 
-                        json?.props?.pageProps?.data?.products ||
-                        json?.props?.pageProps?.initialState?.products ||
-                        json?.props?.pageProps?.results ||
-                        null;
+        const products = json?.props?.pageProps?.products ||
+            json?.props?.pageProps?.data?.products ||
+            json?.props?.pageProps?.initialState?.products ||
+            json?.props?.pageProps?.results ||
+            null;
 
         if (products && Array.isArray(products)) {
             return products.map(p => ({
-                productUrl: p.url || p.productUrl || `https://www.faire.com/product/${p.id || p.token}`,
-                productName: p.name || p.title || p.productName || '',
+                productUrl: p.url || p.productUrl || (p.token ? `https://www.faire.com/product/${p.token}` : null),
+                productName: p.name || p.title || p.productName || 'Unknown Product',
                 brandName: p.brand?.name || p.brandName || '',
                 brandUrl: p.brand?.url || (p.brandToken ? `https://www.faire.com/brand/${p.brandToken}` : ''),
                 wholesalePrice: p.wholesalePrice || p.price?.wholesale || '',
                 msrp: p.msrp || p.retailPrice || p.price?.retail || '',
-                imageUrl: p.imageUrl || p.image || p.thumbnail || '',
+                imageUrl: p.imageUrl || p.image || p.thumbnail || null,
                 isBestseller: p.isBestseller || p.badges?.includes('bestseller') || false,
                 isProvenSuccess: p.isProvenSuccess || p.badges?.includes('proven') || false,
                 isNew: p.isNew || p.badges?.includes('new') || false
-            }));
+            })).filter(p => p.productUrl);
         }
 
         return null;
@@ -315,7 +316,7 @@ async function fetchDetailsInBatches(items, cookies, proxyUrl) {
         const chunkResults = await Promise.all(promises);
         results.push(...chunkResults.filter(r => r !== null));
         log.info(`Processed ${Math.min(items.length, i + DETAIL_PAGE_CONCURRENCY)} / ${items.length} details...`);
-        
+
         // Human-like delay between batches
         if (i + DETAIL_PAGE_CONCURRENCY < items.length) {
             await new Promise(r => setTimeout(r, 1000 + Math.random() * 1000));
@@ -329,19 +330,19 @@ async function navigateToNextPage(page) {
     try {
         // Strategy 1: Look for Next button with aria-label
         const nextButton = await page.$('a[aria-label="Next page"], button[aria-label="Next page"], a[aria-label="Next"], button[aria-label="Next"]');
-        
+
         if (nextButton) {
             const isDisabled = await nextButton.getAttribute('disabled') !== null;
             const ariaDisabled = await nextButton.getAttribute('aria-disabled');
-            
+
             if (isDisabled || ariaDisabled === 'true') {
                 log.info('Next button is disabled. End of results.');
                 return false;
             }
-            
+
             log.info('Clicking Next Page button...');
             await Promise.all([
-                page.waitForLoadState('domcontentloaded', { timeout: 30000 }).catch(() => {}),
+                page.waitForLoadState('domcontentloaded', { timeout: 30000 }).catch(() => { }),
                 nextButton.click()
             ]);
             return true;
@@ -354,7 +355,7 @@ async function navigateToNextPage(page) {
             if (nextPageLink) {
                 log.info('Clicking numbered pagination...');
                 await nextPageLink.click();
-                await page.waitForLoadState('domcontentloaded', { timeout: 30000 }).catch(() => {});
+                await page.waitForLoadState('domcontentloaded', { timeout: 30000 }).catch(() => { });
                 return true;
             }
         }
@@ -363,7 +364,7 @@ async function navigateToNextPage(page) {
         const currentUrl = page.url();
         const urlObj = new URL(currentUrl);
         const pageParam = urlObj.searchParams.get('page');
-        
+
         if (pageParam) {
             const nextPage = parseInt(pageParam) + 1;
             urlObj.searchParams.set('page', nextPage.toString());
@@ -381,10 +382,10 @@ async function navigateToNextPage(page) {
 
 async function fetchProductDetails(listingItem, cookies, proxyUrl) {
     const { productUrl, productName: listingName, imageUrl: listingImage, isBestseller, isProvenSuccess, isNew } = listingItem;
-    
+
     try {
         // Construct Cookie Header
-        const cookieHeader = cookies && cookies.length > 0 
+        const cookieHeader = cookies && cookies.length > 0
             ? cookies.map(c => `${c.name}=${c.value}`).join('; ')
             : '';
 
@@ -430,9 +431,9 @@ async function fetchProductDetails(listingItem, cookies, proxyUrl) {
         if (nextData) {
             try {
                 const json = JSON.parse(nextData);
-                const productData = json?.props?.pageProps?.product || 
-                                   json?.props?.pageProps?.data?.product ||
-                                   json?.props?.pageProps?.initialProduct;
+                const productData = json?.props?.pageProps?.product ||
+                    json?.props?.pageProps?.data?.product ||
+                    json?.props?.pageProps?.initialProduct;
 
                 if (productData) {
                     log.debug('Extracted product from __NEXT_DATA__');
@@ -452,7 +453,7 @@ async function fetchProductDetails(listingItem, cookies, proxyUrl) {
                     jsonLdData = json;
                     return false; // break
                 }
-            } catch {}
+            } catch { }
         });
 
         if (jsonLdData) {
@@ -481,7 +482,7 @@ async function fetchProductDetails(listingItem, cookies, proxyUrl) {
         const brandName = $('a[href^="/brand/"] span, [data-testid="brand-name"], [class*="BrandName"]')
             .first().text().trim();
 
-        const brandUrl = $('a[href^="/brand/"]').attr('href') 
+        const brandUrl = $('a[href^="/brand/"]').attr('href')
             ? `https://www.faire.com${$('a[href^="/brand/"]').attr('href')}`
             : '';
 
@@ -518,13 +519,13 @@ async function fetchProductDetails(listingItem, cookies, proxyUrl) {
 
         // Try to identify wholesale vs retail
         const bodyText = $('body').text().toLowerCase();
-        
+
         if (cookies.length > 0) {
             // Authenticated - look for wholesale price
             const wholesaleText = $(':contains("Wholesale"), :contains("wholesale")')
                 .filter((i, el) => /\$\d+/.test($(el).text()))
                 .first().text();
-            
+
             const wholesaleMatch = wholesaleText.match(/\$[\d,.]+/);
             if (wholesaleMatch) wholesalePrice = wholesaleMatch[0];
         }
@@ -533,7 +534,7 @@ async function fetchProductDetails(listingItem, cookies, proxyUrl) {
         const msrpText = $(':contains("MSRP"), :contains("Retail"), :contains("retail")')
             .filter((i, el) => /\$\d+/.test($(el).text()))
             .first().text();
-        
+
         const msrpMatch = msrpText.match(/\$[\d,.]+/);
         if (msrpMatch) msrp = msrpMatch[0];
 
@@ -567,7 +568,7 @@ async function fetchProductDetails(listingItem, cookies, proxyUrl) {
 
     } catch (e) {
         log.error(`Failed to fetch details for ${productUrl}: ${e.message}`);
-        
+
         // Return partial data on error
         return {
             productName: listingName || 'Error fetching details',
@@ -609,11 +610,11 @@ function formatProductData(data, url, isAuthenticated) {
 // Calculate discount percentage
 function calculateDiscount(wholesalePrice, msrp) {
     if (!wholesalePrice || !msrp) return '';
-    
+
     try {
         const wholesale = parseFloat(wholesalePrice.replace(/[^0-9.]/g, ''));
         const retail = parseFloat(msrp.replace(/[^0-9.]/g, ''));
-        
+
         if (wholesale && retail && retail > wholesale) {
             const discount = ((retail - wholesale) / retail * 100).toFixed(0);
             return `${discount}%`;
@@ -621,7 +622,7 @@ function calculateDiscount(wholesalePrice, msrp) {
     } catch (e) {
         log.debug('Discount calculation failed');
     }
-    
+
     return '';
 }
 
@@ -635,7 +636,7 @@ async function autoScroll(page) {
                 const scrollHeight = document.body.scrollHeight;
                 window.scrollBy(0, distance);
                 totalHeight += distance;
-                
+
                 // Stop if reached bottom or max height
                 if (totalHeight >= scrollHeight - window.innerHeight || totalHeight >= maxHeight) {
                     clearInterval(timer);
