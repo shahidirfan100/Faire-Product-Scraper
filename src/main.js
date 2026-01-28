@@ -50,18 +50,18 @@ async function main() {
 
     const crawler = new PlaywrightCrawler({
         proxyConfiguration,
-        maxRequestRetries: 5,
+        maxRequestRetries: 2,
         maxConcurrency: 1,
         useSessionPool: true,
         sessionPoolOptions: {
-            maxPoolSize: 10,
+            maxPoolSize: 5,
             sessionOptions: {
-                maxUsageCount: 15,
-                maxErrorScore: 5,
+                maxUsageCount: 10,
+                maxErrorScore: 3,
             },
         },
-        requestHandlerTimeoutSecs: 900,
-        navigationTimeoutSecs: 120,
+        requestHandlerTimeoutSecs: 180,
+        navigationTimeoutSecs: 60,
 
         browserPoolOptions: {
             useFingerprints: true,
@@ -101,7 +101,7 @@ async function main() {
             log.info(`Processing listing: ${request.url}`);
 
             // Inject fetch interceptor directly in browser context
-            await page.evaluateOnNewDocument(() => {
+            await page.addInitScript(() => {
                 window.capturedProducts = [];
                 const originalFetch = window.fetch;
                 window.fetch = async (...args) => {
@@ -139,12 +139,12 @@ async function main() {
             });
 
             // Wait for page load and initial API call
-            await page.waitForTimeout(4000);
+            await page.waitForTimeout(3000);
 
             // Scroll to trigger more API calls
             for (let i = 0; i < 3; i++) {
                 await autoScroll(page);
-                await page.waitForTimeout(2000);
+                await page.waitForTimeout(1500);
             }
 
             // Extract captured products from browser
