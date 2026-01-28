@@ -154,6 +154,10 @@ async function main() {
             let processingQueue = [];
             let noNewDataCount = 0;
 
+            // Wait for initial API response to populate
+            log.info('Waiting for initial API data...');
+            await page.waitForTimeout(3000);
+
             // Main loop: Scroll -> Wait -> Process Intercepted -> Check Done
             while (totalCollected < RESULTS_WANTED) {
                 // Transfer from intercept buffer to processing queue (deduplicated)
@@ -189,14 +193,14 @@ async function main() {
                 if (totalCollected >= RESULTS_WANTED) break;
 
                 // Stop if we haven't seen new data for a while
-                if (noNewDataCount > 5) {
+                if (noNewDataCount > 3) {
                     log.info('No new products found after multiple scrolls. Stopping.');
                     break;
                 }
 
                 // Scroll to trigger more API calls
                 await autoScroll(page);
-                await page.waitForTimeout(2000); // Wait for network
+                await page.waitForTimeout(3000); // Increased wait for network responses
             }
 
             log.info(`✅ Scraping finished. Total products collected: ${totalCollected}`);
