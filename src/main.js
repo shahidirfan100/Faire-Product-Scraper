@@ -1,13 +1,29 @@
-import { Actor, log } from 'apify';
-import { PlaywrightCrawler, Dataset } from 'crawlee';
+import { Actor, log, Dataset } from 'apify';
+import { PlaywrightCrawler } from 'crawlee';
+import { firefox } from 'playwright';
 import { gotScraping } from 'got-scraping';
-import { load } from 'cheerio';
+import * as cheerio from 'cheerio';
 
-const DETAIL_PAGE_CONCURRENCY = 5;
+await Actor.init();
+
+// CONFIGURATION
+const INPUT = await Actor.getInput() || {};
+const START_URL = INPUT.startUrl || 'https://www.faire.com/search?q=candle';
+const SEARCH_QUERY = INPUT.searchQuery || '';
+const RESULTS_WANTED = INPUT.resultsWanted || 20;
+const DETAIL_PAGE_CONCURRENCY = 10; // Increased as requested
 const PROCESSED_URLS = new Set();
+
+let hasLoggedDebug = false;
 
 function normalizeProductRecord(p) {
     if (!p || typeof p !== 'object') return null;
+
+    // DEBUG: Log the first raw product object absolutely reliably
+    if (!hasLoggedDebug) {
+        console.log('🐛 [DEBUG] FIRST RAW PRODUCT INPUT:', JSON.stringify(p, null, 2));
+        hasLoggedDebug = true;
+    }
 
     // Try all possible ID fields
     const token = p.token || p.id || p.productToken || p.product_token || p.slug;
@@ -39,7 +55,7 @@ function normalizeProductRecord(p) {
 
     // 3. Flat fields
     if (!imageUrl) {
-        imageUrl = p.imageUrl || p.image_url || p.thumbnail || p.thumbnailUrl || p.thumbnail_url || p.tile_image?.url || p.square_image?.url;
+        imageUrl = p.imageUrl || p.image_url || p.thumbnail || p.thumbnailUrl || p.thumbnail_url || p.tile_image?.url || p.square_image?.url || p.medium_image_url || p.original_image_url;
     }
 
     // 4. Fallback to image token construction if we only have a token
@@ -57,9 +73,8 @@ function normalizeProductRecord(p) {
     const wholesaleCents = priceObj.wholesale_price_cents || p.wholesale_price_cents || p.wholesalePriceCents || 0;
     const retailCents = priceObj.retail_price_cents || p.retail_price_cents || p.retailPriceCents || 0;
 
-    // Check completeness - we need at least Name and (Brand OR Image) to consider it "useful" enough to skip detail
-    // If we have token + name, we can theoretically allow it, but let's try to get brand too.
-    const isComplete = !!(token && (p.name || p.title) && (brandName || brandToken)); // Relaxed: Image might be missing but we can still skip detail if we have other core data
+    // Check completeness - FORCE FALSE to ensure we visit detail pages for rich data (Description/SKU/MadeIn)
+    const isComplete = false;
 
     return {
         productUrl: `https://www.faire.com/product/${token}`,
@@ -126,10 +141,7 @@ function setupNetworkCapture(page) {
                 return;
             }
 
-            // DEBUG: Log the first raw product object to validte our mapping
-            if (page._capturedProducts.length === 0 && products.length > 0) {
-                log.info('🐛 [DEBUG] RAW API PRODUCT STRUCTURE:', JSON.stringify(json.product_tiles?.[0]?.product || products[0], null, 2));
-            }
+            // Old debug log removed - using reliable one in normalizeProductRecord
 
             let addedCount = 0;
             for (const product of products) {
@@ -220,7 +232,7 @@ async function main() {
             fingerprintOptions: {
                 fingerprintGeneratorOptions: {
                     browsers: [
-                        { name: 'chrome', minVersion: 120, maxVersion: 130 }
+                        { name: 'firefox', minVersion: 120, maxVersion: 130 }
                     ],
                     operatingSystems: ['windows', 'macos'],
                     devices: ['desktop'],
@@ -508,24 +520,19 @@ async function fetchDetailsInBatches(items, cookies, proxyUrl, currentTotal, tar
     let pushedCount = 0;
     const totalBatches = Math.ceil(items.length / DETAIL_PAGE_CONCURRENCY);
 
-    log.info(`🔄 Fetching details for ${items.length} products in ${totalBatches} batches (${DETAIL_PAGE_CONCURRENCY} concurrent)...`);
+    log.info(`🔄 Fetching RICH details for ${items.length} products in ${totalBatches} batches (${DETAIL_PAGE_CONCURRENCY} concurrent)...`);
 
     for (let i = 0; i < items.length; i += DETAIL_PAGE_CONCURRENCY) {
-        // Stop if we've reached the target
-        if (currentTotal + pushedCount >= targetTotal) {
-            log.info(`🎯 Target reached during batch processing. Stopping detail fetch.`);
-            break;
-        }
+        if (currentTotal + pushedCount >= targetTotal) break;
 
-        const batchNum = Math.floor(i / DETAIL_PAGE_CONCURRENCY) + 1;
         const chunk = items.slice(i, i + DETAIL_PAGE_CONCURRENCY);
+        const batchNum = Math.floor(i / DETAIL_PAGE_CONCURRENCY) + 1;
 
         log.info(`📦 Processing batch ${batchNum}/${totalBatches} (${chunk.length} products)`);
         const promises = chunk.map(item => fetchProductDetails(item, cookies, proxyUrl));
         const chunkResults = await Promise.all(promises);
-        const successfulResults = chunkResults.filter(r => r !== null);
+        const successfulResults = chunkResults.filter(r => r !== null && !r.error);
 
-        // Push this batch immediately to dataset
         if (successfulResults.length > 0) {
             await Dataset.pushData(successfulResults);
             pushedCount += successfulResults.length;
@@ -534,10 +541,8 @@ async function fetchDetailsInBatches(items, cookies, proxyUrl, currentTotal, tar
             log.info(`⚠️ Batch ${batchNum} completed: 0/${chunk.length} successful`);
         }
 
-        // Human-like delay between batches
-        if (i + DETAIL_PAGE_CONCURRENCY < items.length && currentTotal + pushedCount < targetTotal) {
-            const delay = 1000 + Math.random() * 1000;
-            await new Promise(r => setTimeout(r, delay));
+        if (i + DETAIL_PAGE_CONCURRENCY < items.length) {
+            await new Promise(r => setTimeout(r, 1000 + Math.random() * 1000));
         }
     }
 
@@ -546,91 +551,91 @@ async function fetchDetailsInBatches(items, cookies, proxyUrl, currentTotal, tar
 }
 
 async function fetchProductDetails(listingItem, cookies, proxyUrl) {
-    const { productUrl, productName: listingName, imageUrl: listingImage, isBestseller, isProvenSuccess, isNew } = listingItem;
-
     try {
-        const cookieHeader = cookies && cookies.length > 0
-            ? cookies.map(c => `${c.name}=${c.value}`).join('; ')
-            : '';
+        const cookieHeader = cookies?.map(c => `${c.name}=${c.value}`).join('; ') || '';
 
         const response = await gotScraping({
-            url: productUrl,
+            url: listingItem.productUrl,
             proxyUrl,
             headers: {
                 'Cookie': cookieHeader,
                 'Referer': 'https://www.faire.com/',
-                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+                'User-Agent': getRandomUserAgent(),
             },
             headerGeneratorOptions: {
-                browsers: [{ name: 'chrome', minVersion: 120 }],
+                browsers: [{ name: 'firefox', minVersion: 120 }], // Match our browser
                 devices: ['desktop'],
                 locales: ['en-US'],
-                operatingSystems: ['windows'],
+                operatingSystems: ['windows', 'linux', 'macos'],
             },
             timeout: { request: 30000 }
         });
 
-        const $ = load(response.body);
+        const html = response.body;
+        const $ = cheerio.load(html);
 
-        // Check for blocking
-        const title = $('title').text();
-        if (title.includes('Access Denied') || title.includes('Captcha')) {
-            log.warning(`Blocked on detail page: ${productUrl}`);
-            return listingItem; // Return basic info at least
+        // 1. Description
+        const description = $('[data-testid="product-description"]').text().trim()
+            || $('div[class*="Description"] p').text().trim()
+            || $('div#product-description-content').text().trim()
+            || $('meta[property="og:description"]').attr('content')
+            || '';
+
+        // 2. SKU
+        const sku = $('[data-testid="product-sku"]').text().trim()
+            || $('span:contains("SKU")').next().text().trim()
+            || $('div:contains("SKU")').last().text().replace('SKU', '').trim()
+            || '';
+
+        // 3. Made In / Location
+        const madeIn = $('[data-testid="product-location"]').text().trim()
+            || $('span:contains("Made in")').text().replace('Made in', '').trim()
+            || '';
+
+        // 4. Shipping / Delivery
+        const delivery = $('[data-testid="product-shipping"]').text().trim()
+            || $('div[class*="Shipping"]').text().trim()
+            || '';
+
+        // 5. Fallback for missing Listing Data (if API failed)
+        const brandName = listingItem.brandName || $('[data-testid="brand-name"]').text().trim() || $('a[href*="/brand/"]').first().text().trim() || '';
+        const productName = listingItem.productName || $('h1').text().trim() || $('[data-testid="product-title"]').text().trim() || '';
+
+        // Image Fallback
+        let imageUrl = listingItem.imageUrl;
+        if (!imageUrl) {
+            imageUrl = $('meta[property="og:image"]').attr('content')
+                || $('img[data-testid="product-image"]').attr('src')
+                || $('img[class*="ProductImage"]').attr('src');
         }
 
-        // Try JSON-LD first
-        let jsonLdData = null;
-        $('script[type="application/ld+json"]').each((_, el) => {
-            try {
-                const json = JSON.parse($(el).text());
-                if (json['@type'] === 'Product') {
-                    jsonLdData = json;
-                    return false;
-                }
-            } catch { }
-        });
-
-        if (jsonLdData) {
-            return {
-                productName: jsonLdData.name || listingName,
-                brandName: jsonLdData.brand?.name || '',
-                brandUrl: jsonLdData.brand?.url || '',
-                productUrl,
-                imageUrl: jsonLdData.image || listingImage,
-                wholesalePrice: jsonLdData.offers?.price || listingItem.wholesalePrice || '',
-                msrp: jsonLdData.offers?.priceSpecification?.price || listingItem.msrp || '',
-                discount: '',
-                isBestseller: isBestseller || false,
-                isProvenSuccess: isProvenSuccess || false,
-                isNew: isNew || false,
-                currency: jsonLdData.offers?.priceCurrency || 'USD',
-                _scrapedAt: new Date().toISOString()
-            };
-        }
-
-        // Fallback checks for price if missing
-        let wholesalePrice = listingItem.wholesalePrice;
-        let msrp = listingItem.msrp;
-
-        if (!wholesalePrice && cookies.length > 0) {
-            const wText = $(':contains("Wholesale")').filter((i, el) => /\$\d+/.test($(el).text())).last().text();
-            if (wText) {
-                const m = wText.match(/\$[\d,.]+/);
-                if (m) wholesalePrice = m[0];
-            }
+        // Price Fallback (if missing from listing)
+        let wholesalePrice = listingItem.wholesalePriceCents ? `$${(listingItem.wholesalePriceCents / 100).toFixed(2)}` : '';
+        if (!wholesalePrice || wholesalePrice === '$0.00') {
+            wholesalePrice = $('[data-testid="wholesale-price"]').text().trim();
         }
 
         return {
             ...listingItem,
-            wholesalePrice: wholesalePrice || (cookies.length === 0 ? 'Login required' : ''),
-            msrp: msrp || '',
-            _scrapedAt: new Date().toISOString()
+            productName,
+            brandName,
+            imageUrl,
+            description,
+            sku,
+            madeIn,
+            delivery,
+            wholesalePrice,
+            _scrapedAt: new Date().toISOString(),
+            _detailsFetched: true
         };
 
     } catch (e) {
-        log.error(`Failed to fetch details for ${productUrl}: ${e.message}`);
-        return listingItem;
+        log.warning(`Failed details for ${listingItem.productUrl}: ${e.message}`);
+        return {
+            ...listingItem,
+            error: `Detail fetch failed: ${e.message}`,
+            _detailsFetched: false
+        };
     }
 }
 

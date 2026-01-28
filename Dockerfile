@@ -1,5 +1,5 @@
-# Specify the base Docker image with Playwright + Chrome
-FROM apify/actor-node-playwright-chrome:22-1.56.1
+# Specify the base Docker image with Playwright + Firefox
+FROM apify/actor-node-playwright-firefox:22-1.56.1
 
 # Check preinstalled packages
 RUN npm ls crawlee apify playwright
