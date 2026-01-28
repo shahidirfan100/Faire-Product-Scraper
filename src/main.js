@@ -6,12 +6,85 @@ import { load } from 'cheerio';
 const DETAIL_PAGE_CONCURRENCY = 5;
 const PROCESSED_URLS = new Set();
 
+function normalizeProductRecord(p) {
+    const token = p?.token || p?.id || p?.productToken || p?.slug;
+    if (!token) return null;
+
+    return {
+        productUrl: `https://www.faire.com/product/${token}`,
+        productName: p?.name || p?.title || p?.productName || '',
+        brandName: p?.brand?.name || p?.brandName || '',
+        brandToken: p?.brand?.token || p?.brandToken || p?.brand?.slug || '',
+        imageUrl: p?.images?.[0]?.url || p?.image?.url || p?.imageUrl || null,
+        wholesalePriceCents: p?.price?.wholesale_price_cents || p?.wholesale_price_cents || p?.wholesalePriceCents || 0,
+        retailPriceCents: p?.price?.retail_price_cents || p?.retail_price_cents || p?.retailPriceCents || 0,
+        badges: p?.badges || p?.tags || [],
+    };
+}
+
+function extractProductsFromPayload(payload) {
+    if (!payload || typeof payload !== 'object') return [];
+
+    const candidates = [
+        payload.products,
+        payload.product_tiles,
+        payload.results,
+        payload?.data?.searchProducts?.products,
+        payload?.data?.browseProducts?.products,
+        payload?.data?.search?.products,
+    ].filter(Array.isArray);
+
+    const flattened = candidates.flat();
+    return flattened
+        .map(normalizeProductRecord)
+        .filter(Boolean);
+}
+
+function setupNetworkCapture(page) {
+    page._capturedProducts = [];
+    const seen = new Set();
+
+    page.on('response', async (response) => {
+        const url = response.url();
+        const resourceType = response.request().resourceType();
+        if (!SEARCH_URL_PATTERNS.some((rx) => rx.test(url))) return;
+        if (!['xhr', 'fetch'].includes(resourceType)) return;
+
+        try {
+            const contentType = response.headers()['content-type'] || '';
+            if (!contentType.includes('json')) return;
+
+            const json = await response.json();
+            const products = extractProductsFromPayload(json);
+            if (products.length === 0) return;
+
+            for (const product of products) {
+                if (!product.productUrl || seen.has(product.productUrl)) continue;
+                seen.add(product.productUrl);
+                page._capturedProducts.push(product);
+            }
+
+            log.debug(`Captured ${products.length} products from ${url}`);
+        } catch (e) {
+            log.debug(`Failed to parse API response from ${url}: ${e.message}`);
+        }
+    });
+}
+
 const STEALTH_SCRIPT = () => {
     Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
     Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5] });
     window.chrome = { runtime: {} };
     Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'] });
 };
+
+const SEARCH_URL_PATTERNS = [
+    /api\/v\d+\/search/i,
+    /search-product-tiles/i,
+    /product-tiles/i,
+    /search\/products/i,
+    /graphql/i, // used by Faire to deliver product tiles
+];
 
 async function main() {
     await Actor.init();
@@ -78,6 +151,8 @@ async function main() {
         },
 
         preNavigationHooks: [async ({ page, context }) => {
+            setupNetworkCapture(page);
+
             // Block heavy resources
             await page.route('**/*', (route) => {
                 const type = route.request().resourceType();
@@ -100,73 +175,65 @@ async function main() {
             if (totalCollected >= RESULTS_WANTED) return;
             log.info(`Processing listing: ${request.url}`);
 
-            // Inject fetch interceptor directly in browser context
-            await page.addInitScript(() => {
-                window.capturedProducts = [];
-                const originalFetch = window.fetch;
-                window.fetch = async (...args) => {
-                    const response = await originalFetch(...args);
-                    const url = typeof args[0] === 'string' ? args[0] : args[0].url;
-
-                    if (url.includes('/api/v3/search/products') || url.includes('/search-product-tiles')) {
-                        const clone = response.clone();
-                        try {
-                            const json = await clone.json();
-                            const products = json.products || json.product_tiles || json.results;
-                            if (products && Array.isArray(products)) {
-                                console.log(`Captured ${products.length} products from API`);
-                                for (const p of products) {
-                                    const token = p.token || p.id;
-                                    if (!token) continue;
-                                    window.capturedProducts.push({
-                                        productUrl: `https://www.faire.com/product/${token}`,
-                                        productName: p.name || p.title || '',
-                                        brandName: p.brand?.name || '',
-                                        brandToken: p.brand?.token || '',
-                                        imageUrl: p.images?.[0]?.url || p.image?.url || null,
-                                        wholesalePriceCents: p.price?.wholesale_price_cents || 0,
-                                        retailPriceCents: p.price?.retail_price_cents || 0,
-                                        badges: p.badges || []
-                                    });
-                                }
-                            }
-                        } catch (e) {
-                            console.error('Failed to parse API response:', e);
-                        }
-                    }
-                    return response;
-                };
-            });
-
-            // Wait for page load and initial API call
-            await page.waitForTimeout(3000);
+            // Wait for page load and initial API calls
+            await page.waitForTimeout(2000);
 
             // Scroll to trigger more API calls
             for (let i = 0; i < 3; i++) {
                 await autoScroll(page);
-                await page.waitForTimeout(1500);
+                await page.waitForTimeout(1200);
             }
 
-            // Extract captured products from browser
-            const capturedData = await page.evaluate(() => window.capturedProducts || []);
-            log.info(`✅ Captured ${capturedData.length} products from browser context`);
+            // Give network listeners time to collect final responses
+            await page.waitForTimeout(1000);
+
+            const capturedFromNetwork = page._capturedProducts || [];
+            log.info(`✅ Captured ${capturedFromNetwork.length} products from network responses`);
+
+            let capturedData = capturedFromNetwork;
 
             if (capturedData.length === 0) {
-                log.warning('No products captured from API. Exiting.');
+                const nextDataProducts = await extractNextData(page);
+                if (nextDataProducts?.length) {
+                    log.info(`Recovered ${nextDataProducts.length} products from __NEXT_DATA__`);
+                    capturedData = nextDataProducts.map(normalizeProductRecord).filter(Boolean);
+                }
+            }
+
+            if (capturedData.length === 0) {
+                const domProducts = await extractDomProducts(page);
+                if (domProducts.length) {
+                    log.info(`Recovered ${domProducts.length} products from DOM fallback`);
+                    capturedData = domProducts;
+                }
+            }
+
+            if (capturedData.length === 0) {
+                log.warning('No products captured from API or fallbacks. Skipping request.');
                 return;
             }
 
             // Format and deduplicate
-            const allProducts = capturedData.map(p => ({
+            const toMoney = (value) => {
+                if (value === undefined || value === null) return '';
+                if (typeof value === 'number') {
+                    // Assume cents if value looks like cents, otherwise leave as-is
+                    return value > 0 && value < 100000 ? `$${(value / 100).toFixed(2)}` : `$${value.toFixed(2)}`;
+                }
+                return String(value);
+            };
+
+            const allProducts = capturedData.map((p) => ({
                 productUrl: p.productUrl,
-                productName: p.productName,
-                brandName: p.brandName,
-                brandUrl: p.brandToken ? `https://www.faire.com/brand/${p.brandToken}` : '',
+                productName: p.productName || p.title,
+                brandName: p.brandName || '',
+                brandUrl: p.brandUrl || (p.brandToken ? `https://www.faire.com/brand/${p.brandToken}` : ''),
                 imageUrl: p.imageUrl,
-                wholesalePrice: p.wholesalePriceCents ? `$${(p.wholesalePriceCents / 100).toFixed(2)}` : '',
-                msrp: p.retailPriceCents ? `$${(p.retailPriceCents / 100).toFixed(2)}` : '',
-                isBestseller: p.badges.includes('bestseller'),
-                isNew: p.badges.includes('new')
+                wholesalePrice: toMoney(p.wholesalePriceCents ?? p.wholesalePrice),
+                msrp: toMoney(p.retailPriceCents ?? p.msrp ?? p.retailPrice),
+                isBestseller: Array.isArray(p.badges) ? p.badges.includes('bestseller') : !!p.isBestseller,
+                isProvenSuccess: Array.isArray(p.badges) ? p.badges.includes('proven') : !!p.isProvenSuccess,
+                isNew: Array.isArray(p.badges) ? p.badges.includes('new') : !!p.isNew,
             }));
 
             const uniqueProducts = [];
@@ -233,6 +300,44 @@ async function extractNextData(page) {
     } catch (e) {
         return null;
     }
+}
+
+async function extractDomProducts(page) {
+    const products = await page.$$eval('a[href*="/product/"]', (anchors) => {
+        const seen = new Set();
+        const items = [];
+
+        anchors.forEach((a) => {
+            const href = a.getAttribute('href') || '';
+            const match = href.match(/\/product\/([^/?#]+)/);
+            if (!match) return;
+            const token = match[1];
+            if (seen.has(token)) return;
+            seen.add(token);
+
+            const container = a.closest('[data-testid="product-card"], article, div');
+            const name =
+                (container?.querySelector('h3,h2')?.textContent ||
+                    a.getAttribute('aria-label') ||
+                    a.textContent ||
+                    '').trim();
+            const brand =
+                (container?.querySelector('[data-testid*="brand"], [class*="brand"], span')?.textContent || '').trim();
+            const img = container?.querySelector('img');
+
+            items.push({
+                productUrl: `https://www.faire.com/product/${token}`,
+                productName: name,
+                brandName: brand,
+                imageUrl: img?.src || null,
+                badges: [],
+            });
+        });
+
+        return items;
+    });
+
+    return products || [];
 }
 
 // Batch fetch product details with retry logic
