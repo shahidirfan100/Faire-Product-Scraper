@@ -1,6 +1,59 @@
-[{
+{
   "actorSpecification": 1,
-  "fields": {},
+  "fields": {
+    "productName": {
+      "title": "Product Name",
+      "type": "string"
+    },
+    "brandName": {
+      "title": "Brand Name",
+      "type": "string"
+    },
+    "brandUrl": {
+      "title": "Brand URL",
+      "type": "string"
+    },
+    "productUrl": {
+      "title": "Product URL",
+      "type": "string"
+    },
+    "imageUrl": {
+      "title": "Image URL",
+      "type": "string"
+    },
+    "wholesalePrice": {
+      "title": "Wholesale Price",
+      "type": "string"
+    },
+    "msrp": {
+      "title": "MSRP",
+      "type": "string"
+    },
+    "discount": {
+      "title": "Discount",
+      "type": "string"
+    },
+    "isBestseller": {
+      "title": "Bestseller",
+      "type": "boolean"
+    },
+    "isProvenSuccess": {
+      "title": "Proven Success",
+      "type": "boolean"
+    },
+    "isNew": {
+      "title": "New Product",
+      "type": "boolean"
+    },
+    "currency": {
+      "title": "Currency",
+      "type": "string"
+    },
+    "_scrapedAt": {
+      "title": "Scraped At",
+      "type": "string"
+    }
+  },
   "views": {
     "overview": {
       "title": "Overview",
@@ -12,10 +65,8 @@
           "msrp",
           "discount",
           "isBestseller",
-          "isProvenSuccess",
-          "isNew",
-          "productUrl",
-          "brandUrl"
+          "imageUrl",
+          "productUrl"
         ]
       },
       "display": {
@@ -30,11 +81,11 @@
             "format": "text"
           },
           "wholesalePrice": {
-            "label": "Wholesale Price (€)",
+            "label": "Wholesale",
             "format": "text"
           },
           "msrp": {
-            "label": "MSRP (€)",
+            "label": "MSRP",
             "format": "text"
           },
           "discount": {
@@ -45,20 +96,12 @@
             "label": "Bestseller",
             "format": "boolean"
           },
-          "isProvenSuccess": {
-            "label": "Proven Success",
-            "format": "boolean"
-          },
-          "isNew": {
-            "label": "New Product",
-            "format": "boolean"
+          "imageUrl": {
+            "label": "Image",
+            "format": "image"
           },
           "productUrl": {
             "label": "Product URL",
-            "format": "link"
-          },
-          "brandUrl": {
-            "label": "Brand URL",
             "format": "link"
           }
         }
@@ -66,4 +109,3 @@
     }
   }
 }
-]

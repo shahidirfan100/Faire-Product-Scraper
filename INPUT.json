@@ -1,6 +1,10 @@
 {
-  "startUrl": "",
-  "searchQuery": "candles",
+  "startUrl": "https://www.faire.com/search?q=candles",
+  "searchQuery": "",
   "resultsWanted": 20,
-  "cookies": []
+  "cookies": [],
+  "proxyConfiguration": {
+    "useApifyProxy": true,
+    "apifyProxyGroups": ["RESIDENTIAL"]
+  }
 }
