@@ -13,26 +13,42 @@ function normalizeProductRecord(p) {
     const token = p.token || p.id || p.productToken || p.product_token || p.slug;
     if (!token) return null;
 
-    // Brand extraction
+    // Brand extraction - handle various structures
     const brandObj = p.brand || {};
-    const brandName = brandObj.name || p.brandName || p.brand_name || '';
-    const brandToken = brandObj.token || p.brandToken || p.brand_token || brandObj.slug || '';
+    let brandName = brandObj.name || p.brandName || p.brand_name || '';
+    let brandToken = brandObj.token || p.brandToken || p.brand_token || brandObj.slug || '';
+
+    // Sometimes brand is just a string name
+    if (typeof p.brand === 'string') brandName = p.brand;
+
     const brandUrl = brandToken ? `https://www.faire.com/brand/${brandToken}` : '';
 
-    // Image extraction - try arrays, objects, and flat fields
+    // Image extraction - aggressive fallbacks
     let imageUrl = null;
+
+    // 1. Array of objects or strings
     if (Array.isArray(p.images) && p.images.length > 0) {
-        imageUrl = p.images[0]?.url || p.images[0]?.src || p.images[0]; // Sometimes plain string
+        const firstImg = p.images[0];
+        imageUrl = typeof firstImg === 'object' ? (firstImg.url || firstImg.src || firstImg.token) : firstImg;
     }
+
+    // 2. Single object or string
     if (!imageUrl && p.image) {
-        imageUrl = typeof p.image === 'object' ? (p.image.url || p.image.src) : p.image;
+        imageUrl = typeof p.image === 'object' ? (p.image.url || p.image.src || p.image.token) : p.image;
     }
+
+    // 3. Flat fields
     if (!imageUrl) {
-        imageUrl = p.imageUrl || p.image_url || p.thumbnail || p.thumbnailUrl || p.thumbnail_url || p.tile_image?.url;
+        imageUrl = p.imageUrl || p.image_url || p.thumbnail || p.thumbnailUrl || p.thumbnail_url || p.tile_image?.url || p.square_image?.url;
     }
-    // Normalize image URL (sometimes relative or missing protocol)
-    if (imageUrl && typeof imageUrl === 'string' && !imageUrl.startsWith('http')) {
-        // Faire sometimes uses relative paths or protocol-less
+
+    // 4. Fallback to image token construction if we only have a token
+    if (imageUrl && !imageUrl.startsWith('http') && !imageUrl.startsWith('//') && imageUrl.match(/^[a-zA-Z0-9_-]+$/)) {
+        imageUrl = `https://cdn.faire.com/fastly/${imageUrl}.jpg`;
+    }
+
+    // Normalize image URL
+    if (imageUrl && typeof imageUrl === 'string') {
         if (imageUrl.startsWith('//')) imageUrl = `https:${imageUrl}`;
     }
 
@@ -41,13 +57,9 @@ function normalizeProductRecord(p) {
     const wholesaleCents = priceObj.wholesale_price_cents || p.wholesale_price_cents || p.wholesalePriceCents || 0;
     const retailCents = priceObj.retail_price_cents || p.retail_price_cents || p.retailPriceCents || 0;
 
-    // Check completeness
-    const isComplete = !!(brandName && imageUrl && token);
-
-    // DEBUG: Log first incomplete product to help user debug
-    if (!isComplete && Math.random() < 0.01) { // Log 1% of incomplete to avoid spam
-        console.log(`[DEBUG] Incomplete product data: Token=${token}, Brand=${brandName}, Image=${!!imageUrl}. Keys: ${Object.keys(p).join(',')}`);
-    }
+    // Check completeness - we need at least Name and (Brand OR Image) to consider it "useful" enough to skip detail
+    // If we have token + name, we can theoretically allow it, but let's try to get brand too.
+    const isComplete = !!(token && (p.name || p.title) && (brandName || brandToken)); // Relaxed: Image might be missing but we can still skip detail if we have other core data
 
     return {
         productUrl: `https://www.faire.com/product/${token}`,
@@ -112,6 +124,11 @@ function setupNetworkCapture(page) {
             if (products.length === 0) {
                 log.debug(`No products found in response from ${url}`);
                 return;
+            }
+
+            // DEBUG: Log the first raw product object to validte our mapping
+            if (page._capturedProducts.length === 0 && products.length > 0) {
+                log.info('🐛 [DEBUG] RAW API PRODUCT STRUCTURE:', JSON.stringify(json.product_tiles?.[0]?.product || products[0], null, 2));
             }
 
             let addedCount = 0;
