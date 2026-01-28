@@ -7,6 +7,8 @@ const DETAIL_PAGE_CONCURRENCY = 5;
 const PROCESSED_URLS = new Set();
 
 function normalizeProductRecord(p) {
+    if (!p || typeof p !== 'object') return null;
+
     const token = p?.token || p?.id || p?.productToken || p?.slug;
     if (!token) return null;
 
@@ -26,9 +28,11 @@ function extractProductsFromPayload(payload) {
     if (!payload || typeof payload !== 'object') return [];
 
     const candidates = [
+        // Faire's product_tiles is an array of {product: {...}} objects
+        payload.product_tiles?.map(tile => tile.product),
         payload.products,
-        payload.product_tiles,
         payload.results,
+        payload?.data?.products,
         payload?.data?.searchProducts?.products,
         payload?.data?.browseProducts?.products,
         payload?.data?.search?.products,
@@ -45,28 +49,46 @@ function setupNetworkCapture(page) {
     const seen = new Set();
 
     page.on('response', async (response) => {
-        const url = response.url();
-        const resourceType = response.request().resourceType();
-        if (!SEARCH_URL_PATTERNS.some((rx) => rx.test(url))) return;
-        if (!['xhr', 'fetch'].includes(resourceType)) return;
-
         try {
+            const url = response.url();
+            const resourceType = response.request().resourceType();
+
+            // Only process XHR/Fetch requests matching our patterns
+            if (!['xhr', 'fetch'].includes(resourceType)) return;
+            if (!SEARCH_URL_PATTERNS.some((rx) => rx.test(url))) return;
+
+            // Check response status
+            const status = response.status();
+            if (status !== 200) {
+                log.debug(`Non-200 status (${status}) for ${url}`);
+                return;
+            }
+
             const contentType = response.headers()['content-type'] || '';
             if (!contentType.includes('json')) return;
 
             const json = await response.json();
             const products = extractProductsFromPayload(json);
-            if (products.length === 0) return;
 
+            if (products.length === 0) {
+                log.debug(`No products found in response from ${url}`);
+                return;
+            }
+
+            let addedCount = 0;
             for (const product of products) {
                 if (!product.productUrl || seen.has(product.productUrl)) continue;
                 seen.add(product.productUrl);
                 page._capturedProducts.push(product);
+                addedCount++;
             }
 
-            log.debug(`Captured ${products.length} products from ${url}`);
+            if (addedCount > 0) {
+                log.info(`📦 Captured ${addedCount} new products from API (${page._capturedProducts.length} total)`);
+            }
         } catch (e) {
-            log.debug(`Failed to parse API response from ${url}: ${e.message}`);
+            // Silent fail for non-critical errors
+            log.debug(`Network capture error: ${e.message}`);
         }
     });
 }
@@ -79,11 +101,12 @@ const STEALTH_SCRIPT = () => {
 };
 
 const SEARCH_URL_PATTERNS = [
-    /api\/v\d+\/search/i,
+    /\/api\/v\d+\/layout\/search-product-tiles/i,
+    /\/api\/v\d+\/search\/products/i,
+    /\/api\/v\d+\/layout\/search-filters/i,
     /search-product-tiles/i,
     /product-tiles/i,
-    /search\/products/i,
-    /graphql/i, // used by Faire to deliver product tiles
+    /graphql/i,
 ];
 
 async function main() {
@@ -123,14 +146,14 @@ async function main() {
 
     const crawler = new PlaywrightCrawler({
         proxyConfiguration,
-        maxRequestRetries: 2,
-        maxConcurrency: 1,
+        maxRequestRetries: 3, // Increased retries for reliability
+        maxConcurrency: 1, // Single page at a time for listing pages
         useSessionPool: true,
         sessionPoolOptions: {
-            maxPoolSize: 5,
+            maxPoolSize: 10, // Increased pool size
             sessionOptions: {
-                maxUsageCount: 10,
-                maxErrorScore: 3,
+                maxUsageCount: 15, // More uses per session
+                maxErrorScore: 2, // Stricter - retire session faster on errors
             },
         },
         requestHandlerTimeoutSecs: 180,
@@ -153,12 +176,35 @@ async function main() {
         preNavigationHooks: [async ({ page, context }) => {
             setupNetworkCapture(page);
 
-            // Block heavy resources
+            // Enhanced resource blocking for speed and stealth
             await page.route('**/*', (route) => {
+                const url = route.request().url();
                 const type = route.request().resourceType();
-                if (['image', 'font', 'media'].includes(type) || route.request().url().includes('google-analytics')) {
+
+                // Block unnecessary resources
+                const blockedTypes = ['image', 'font', 'media', 'stylesheet'];
+                const blockedPatterns = [
+                    'google-analytics',
+                    'googletagmanager',
+                    'facebook.com/tr',
+                    'doubleclick.net',
+                    'hotjar',
+                    'amplitude',
+                    'segment.com',
+                    'mixpanel',
+                    '.woff',
+                    '.svg',
+                    '.jpg',
+                    '.jpeg',
+                    '.png',
+                    '.gif',
+                    '.webp',
+                ];
+
+                if (blockedTypes.includes(type) || blockedPatterns.some(pattern => url.includes(pattern))) {
                     return route.abort();
                 }
+
                 return route.continue();
             });
 
@@ -172,44 +218,52 @@ async function main() {
         }],
 
         async requestHandler({ page, request, proxyInfo }) {
-            if (totalCollected >= RESULTS_WANTED) return;
+            if (totalCollected >= RESULTS_WANTED) {
+                log.info(`✅ Already collected ${totalCollected} products. Skipping.`);
+                return;
+            }
+
             log.info(`Processing listing: ${request.url}`);
 
             // Wait for page load and initial API calls
-            await page.waitForTimeout(2000);
+            await page.waitForTimeout(3000);
 
             // Scroll to trigger more API calls
             for (let i = 0; i < 3; i++) {
                 await autoScroll(page);
-                await page.waitForTimeout(1200);
+                await page.waitForTimeout(1500);
             }
 
             // Give network listeners time to collect final responses
-            await page.waitForTimeout(1000);
+            await page.waitForTimeout(1500);
 
             const capturedFromNetwork = page._capturedProducts || [];
-            log.info(`✅ Captured ${capturedFromNetwork.length} products from network responses`);
+            log.info(`✅ Captured ${capturedFromNetwork.length} products from API interception`);
 
             let capturedData = capturedFromNetwork;
 
+            // Try DOM fallback if API capture failed
             if (capturedData.length === 0) {
+                log.info('🔄 API capture failed, trying DOM fallback...');
+                const domProducts = await extractDomProducts(page);
+                if (domProducts.length) {
+                    log.info(`✅ Recovered ${domProducts.length} products from DOM`);
+                    capturedData = domProducts;
+                }
+            }
+
+            // Try __NEXT_DATA__ as last resort
+            if (capturedData.length === 0) {
+                log.info('🔄 DOM fallback failed, trying __NEXT_DATA__...');
                 const nextDataProducts = await extractNextData(page);
                 if (nextDataProducts?.length) {
-                    log.info(`Recovered ${nextDataProducts.length} products from __NEXT_DATA__`);
+                    log.info(`✅ Recovered ${nextDataProducts.length} products from __NEXT_DATA__`);
                     capturedData = nextDataProducts.map(normalizeProductRecord).filter(Boolean);
                 }
             }
 
             if (capturedData.length === 0) {
-                const domProducts = await extractDomProducts(page);
-                if (domProducts.length) {
-                    log.info(`Recovered ${domProducts.length} products from DOM fallback`);
-                    capturedData = domProducts;
-                }
-            }
-
-            if (capturedData.length === 0) {
-                log.warning('No products captured from API or fallbacks. Skipping request.');
+                log.error('❌ No products captured from any source (API/DOM/__NEXT_DATA__). Possible blocking or page structure changed.');
                 return;
             }
 
@@ -255,11 +309,26 @@ async function main() {
                 totalCollected += results.length;
             }
 
-            log.info(`✅ Scraping finished. Total products collected: ${totalCollected}`);
+            log.info(`✅ Scraping finished! Total products collected: ${totalCollected}/${RESULTS_WANTED}`);
+
+            // Stop crawler immediately if we have enough results
+            if (totalCollected >= RESULTS_WANTED) {
+                log.info('🎯 Target reached. Stopping crawler immediately.');
+                await crawler.teardown();
+            }
         }
     });
 
     await crawler.run([startUrl]);
+
+    // Final summary
+    log.info('='.repeat(60));
+    log.info(`🎉 Scraping completed!`);
+    log.info(`📊 Total products collected: ${totalCollected}/${RESULTS_WANTED}`);
+    log.info(`✅ Success rate: ${((totalCollected / RESULTS_WANTED) * 100).toFixed(1)}%`);
+    log.info('='.repeat(60));
+
+    await Actor.exit();
 }
 
 // Extract data from __NEXT_DATA__ (Next.js sites)
@@ -315,23 +384,42 @@ async function extractDomProducts(page) {
             if (seen.has(token)) return;
             seen.add(token);
 
-            const container = a.closest('[data-testid="product-card"], article, div');
-            const name =
-                (container?.querySelector('h3,h2')?.textContent ||
-                    a.getAttribute('aria-label') ||
-                    a.textContent ||
-                    '').trim();
-            const brand =
-                (container?.querySelector('[data-testid*="brand"], [class*="brand"], span')?.textContent || '').trim();
-            const img = container?.querySelector('img');
+            // Find the closest product card container
+            let container = a.closest('[data-testid*="product"]');
+            if (!container) container = a.closest('article, [class*="ProductCard"], [class*="product-card"]');
+            if (!container) container = a.parentElement;
 
-            items.push({
-                productUrl: `https://www.faire.com/product/${token}`,
-                productName: name,
-                brandName: brand,
-                imageUrl: img?.src || null,
-                badges: [],
+            // Extract product name - try multiple selectors
+            const nameEl = container?.querySelector('[data-testid*="product-name"], h3, h2, [class*="ProductName"]');
+            const name = (nameEl?.textContent || a.getAttribute('aria-label') || '').trim();
+
+            // Extract brand name
+            const brandEl = container?.querySelector('[data-testid*="brand"], [class*="brand"], [class*="Brand"]');
+            const brand = brandEl?.textContent?.trim() || '';
+
+            // Extract image
+            const img = container?.querySelector('img');
+            const imageUrl = img?.src || img?.getAttribute('data-src') || null;
+
+            // Extract badges
+            const badges = [];
+            const badgeEls = container?.querySelectorAll('[class*="badge"], [data-testid*="badge"]') || [];
+            badgeEls.forEach(badge => {
+                const text = badge.textContent?.toLowerCase() || '';
+                if (text.includes('bestseller')) badges.push('bestseller');
+                if (text.includes('new')) badges.push('new');
+                if (text.includes('proven')) badges.push('proven');
             });
+
+            if (name) {
+                items.push({
+                    productUrl: `https://www.faire.com/product/${token}`,
+                    productName: name,
+                    brandName: brand,
+                    imageUrl: imageUrl,
+                    badges: badges,
+                });
+            }
         });
 
         return items;
@@ -343,17 +431,30 @@ async function extractDomProducts(page) {
 // Batch fetch product details with retry logic
 async function fetchDetailsInBatches(items, cookies, proxyUrl) {
     const results = [];
+    const totalBatches = Math.ceil(items.length / DETAIL_PAGE_CONCURRENCY);
+
+    log.info(`🔄 Fetching details for ${items.length} products in ${totalBatches} batches (${DETAIL_PAGE_CONCURRENCY} concurrent)...`);
+
     for (let i = 0; i < items.length; i += DETAIL_PAGE_CONCURRENCY) {
+        const batchNum = Math.floor(i / DETAIL_PAGE_CONCURRENCY) + 1;
         const chunk = items.slice(i, i + DETAIL_PAGE_CONCURRENCY);
+
+        log.info(`📦 Processing batch ${batchNum}/${totalBatches} (${chunk.length} products)`);
         const promises = chunk.map(item => fetchProductDetails(item, cookies, proxyUrl));
         const chunkResults = await Promise.all(promises);
+        const successCount = chunkResults.filter(r => r !== null).length;
+
         results.push(...chunkResults.filter(r => r !== null));
+        log.info(`✅ Batch ${batchNum} completed: ${successCount}/${chunk.length} successful`);
 
         // Human-like delay between batches
         if (i + DETAIL_PAGE_CONCURRENCY < items.length) {
-            await new Promise(r => setTimeout(r, 1000 + Math.random() * 1000));
+            const delay = 1000 + Math.random() * 1000;
+            await new Promise(r => setTimeout(r, delay));
         }
     }
+
+    log.info(`📊 Total detail fetching: ${results.length}/${items.length} successful`);
     return results;
 }
 
