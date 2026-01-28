@@ -100,66 +100,75 @@ async function main() {
             if (totalCollected >= RESULTS_WANTED) return;
             log.info(`Processing listing: ${request.url}`);
 
-            const allProducts = [];
+            // Inject fetch interceptor directly in browser context
+            await page.evaluateOnNewDocument(() => {
+                window.capturedProducts = [];
+                const originalFetch = window.fetch;
+                window.fetch = async (...args) => {
+                    const response = await originalFetch(...args);
+                    const url = typeof args[0] === 'string' ? args[0] : args[0].url;
 
-            // Setup route-based API interception with proper response storage
-            await page.route('**/api/v3/**', async (route) => {
-                const response = await route.fetch();
-                const url = route.request().url();
-
-                if (url.includes('/search/products') || url.includes('/search-product-tiles')) {
-                    try {
-                        const body = await response.text();
-                        const json = JSON.parse(body);
-                        const products = json.products || json.product_tiles || json.results;
-
-                        if (products && Array.isArray(products)) {
-                            log.info(`✅ Captured API response with ${products.length} products`);
-                            for (const p of products) {
-                                const token = p.token || p.id;
-                                if (!token) continue;
-
-                                allProducts.push({
-                                    productUrl: `https://www.faire.com/product/${token}`,
-                                    productName: p.name || p.title || '',
-                                    brandName: p.brand?.name || '',
-                                    brandUrl: p.brand?.token ? `https://www.faire.com/brand/${p.brand?.token}` : '',
-                                    imageUrl: p.images?.[0]?.url || p.image?.url || null,
-                                    wholesalePrice: p.price?.wholesale_price_cents ? `$${(p.price.wholesale_price_cents / 100).toFixed(2)}` : '',
-                                    msrp: p.price?.retail_price_cents ? `$${(p.price.retail_price_cents / 100).toFixed(2)}` : '',
-                                    isBestseller: p.badges?.includes('bestseller') || false,
-                                    isNew: p.badges?.includes('new') || false
-                                });
+                    if (url.includes('/api/v3/search/products') || url.includes('/search-product-tiles')) {
+                        const clone = response.clone();
+                        try {
+                            const json = await clone.json();
+                            const products = json.products || json.product_tiles || json.results;
+                            if (products && Array.isArray(products)) {
+                                console.log(`Captured ${products.length} products from API`);
+                                for (const p of products) {
+                                    const token = p.token || p.id;
+                                    if (!token) continue;
+                                    window.capturedProducts.push({
+                                        productUrl: `https://www.faire.com/product/${token}`,
+                                        productName: p.name || p.title || '',
+                                        brandName: p.brand?.name || '',
+                                        brandToken: p.brand?.token || '',
+                                        imageUrl: p.images?.[0]?.url || p.image?.url || null,
+                                        wholesalePriceCents: p.price?.wholesale_price_cents || 0,
+                                        retailPriceCents: p.price?.retail_price_cents || 0,
+                                        badges: p.badges || []
+                                    });
+                                }
                             }
+                        } catch (e) {
+                            console.error('Failed to parse API response:', e);
                         }
-
-                        await route.fulfill({ response });
-                    } catch (e) {
-                        await route.fulfill({ response });
                     }
-                } else {
-                    await route.fulfill({ response });
-                }
+                    return response;
+                };
             });
 
-            // Wait for page and initial API call
-            await page.waitForTimeout(3000);
-            log.info(`After initial wait: ${allProducts.length} products captured`);
+            // Wait for page load and initial API call
+            await page.waitForTimeout(4000);
 
-            // Scroll to load more
-            for (let i = 0; i < 3 && allProducts.length < RESULTS_WANTED; i++) {
+            // Scroll to trigger more API calls
+            for (let i = 0; i < 3; i++) {
                 await autoScroll(page);
                 await page.waitForTimeout(2000);
-                log.info(`After scroll ${i + 1}: ${allProducts.length} products total`);
             }
 
-            // Process captured products
-            if (allProducts.length === 0) {
+            // Extract captured products from browser
+            const capturedData = await page.evaluate(() => window.capturedProducts || []);
+            log.info(`✅ Captured ${capturedData.length} products from browser context`);
+
+            if (capturedData.length === 0) {
                 log.warning('No products captured from API. Exiting.');
                 return;
             }
 
-            // Deduplicate
+            // Format and deduplicate
+            const allProducts = capturedData.map(p => ({
+                productUrl: p.productUrl,
+                productName: p.productName,
+                brandName: p.brandName,
+                brandUrl: p.brandToken ? `https://www.faire.com/brand/${p.brandToken}` : '',
+                imageUrl: p.imageUrl,
+                wholesalePrice: p.wholesalePriceCents ? `$${(p.wholesalePriceCents / 100).toFixed(2)}` : '',
+                msrp: p.retailPriceCents ? `$${(p.retailPriceCents / 100).toFixed(2)}` : '',
+                isBestseller: p.badges.includes('bestseller'),
+                isNew: p.badges.includes('new')
+            }));
+
             const uniqueProducts = [];
             const seen = new Set();
             for (const product of allProducts) {
