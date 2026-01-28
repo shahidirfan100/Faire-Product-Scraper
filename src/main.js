@@ -12,15 +12,19 @@ function normalizeProductRecord(p) {
     const token = p?.token || p?.id || p?.productToken || p?.slug;
     if (!token) return null;
 
+    const brandToken = p?.brand?.token || p?.brandToken || p?.brand?.slug || '';
+
     return {
         productUrl: `https://www.faire.com/product/${token}`,
         productName: p?.name || p?.title || p?.productName || '',
         brandName: p?.brand?.name || p?.brandName || '',
-        brandToken: p?.brand?.token || p?.brandToken || p?.brand?.slug || '',
+        brandToken: brandToken,
+        brandUrl: brandToken ? `https://www.faire.com/brand/${brandToken}` : '',
         imageUrl: p?.images?.[0]?.url || p?.image?.url || p?.imageUrl || null,
         wholesalePriceCents: p?.price?.wholesale_price_cents || p?.wholesale_price_cents || p?.wholesalePriceCents || 0,
         retailPriceCents: p?.price?.retail_price_cents || p?.retail_price_cents || p?.retailPriceCents || 0,
         badges: p?.badges || p?.tags || [],
+        _hasCompleteData: !!(p?.brand?.name && (p?.images?.[0]?.url || p?.image?.url) && token), // Flag for skipping detail fetch
     };
 }
 
@@ -300,13 +304,32 @@ async function main() {
             }
 
             log.info(`Processing ${uniqueProducts.length} unique products (${RESULTS_WANTED} requested)`);
-            const toProcess = uniqueProducts.slice(0, RESULTS_WANTED);
+            const toProcess = uniqueProducts.slice(0, RESULTS_WANTED - totalCollected);
 
-            // Fetch details and save
-            const results = await fetchDetailsInBatches(toProcess, cookies, proxyInfo?.url);
-            if (results.length > 0) {
-                await Dataset.pushData(results);
-                totalCollected += results.length;
+            // Check if we have complete data from API (skip detail fetching if yes)
+            const productsWithCompleteData = toProcess.filter(p => capturedData.find(c => c.productUrl === p.productUrl)?._hasCompleteData);
+            const productsNeedingDetails = toProcess.filter(p => !capturedData.find(c => c.productUrl === p.productUrl)?._hasCompleteData);
+
+            log.info(`✅ ${productsWithCompleteData.length} products have complete data from API`);
+            if (productsNeedingDetails.length > 0) {
+                log.info(`🔄 ${productsNeedingDetails.length} products need detail page fetch`);
+            }
+
+            // Push complete products immediately
+            if (productsWithCompleteData.length > 0) {
+                const completeResults = productsWithCompleteData.map(p => ({
+                    ...p,
+                    _scrapedAt: new Date().toISOString()
+                }));
+                await Dataset.pushData(completeResults);
+                totalCollected += completeResults.length;
+                log.info(`📊 Pushed ${completeResults.length} complete products to dataset`);
+            }
+
+            // Fetch details only for products missing data
+            if (productsNeedingDetails.length > 0 && totalCollected < RESULTS_WANTED) {
+                const result = await fetchDetailsInBatches(productsNeedingDetails, cookies, proxyInfo?.url, totalCollected, RESULTS_WANTED);
+                totalCollected += result.count;
             }
 
             log.info(`✅ Scraping finished! Total products collected: ${totalCollected}/${RESULTS_WANTED}`);
@@ -428,34 +451,46 @@ async function extractDomProducts(page) {
     return products || [];
 }
 
-// Batch fetch product details with retry logic
-async function fetchDetailsInBatches(items, cookies, proxyUrl) {
-    const results = [];
+// Batch fetch product details with retry logic - pushes incrementally
+async function fetchDetailsInBatches(items, cookies, proxyUrl, currentTotal, targetTotal) {
+    let pushedCount = 0;
     const totalBatches = Math.ceil(items.length / DETAIL_PAGE_CONCURRENCY);
 
     log.info(`🔄 Fetching details for ${items.length} products in ${totalBatches} batches (${DETAIL_PAGE_CONCURRENCY} concurrent)...`);
 
     for (let i = 0; i < items.length; i += DETAIL_PAGE_CONCURRENCY) {
+        // Stop if we've reached the target
+        if (currentTotal + pushedCount >= targetTotal) {
+            log.info(`🎯 Target reached during batch processing. Stopping detail fetch.`);
+            break;
+        }
+
         const batchNum = Math.floor(i / DETAIL_PAGE_CONCURRENCY) + 1;
         const chunk = items.slice(i, i + DETAIL_PAGE_CONCURRENCY);
 
         log.info(`📦 Processing batch ${batchNum}/${totalBatches} (${chunk.length} products)`);
         const promises = chunk.map(item => fetchProductDetails(item, cookies, proxyUrl));
         const chunkResults = await Promise.all(promises);
-        const successCount = chunkResults.filter(r => r !== null).length;
+        const successfulResults = chunkResults.filter(r => r !== null);
 
-        results.push(...chunkResults.filter(r => r !== null));
-        log.info(`✅ Batch ${batchNum} completed: ${successCount}/${chunk.length} successful`);
+        // Push this batch immediately to dataset
+        if (successfulResults.length > 0) {
+            await Dataset.pushData(successfulResults);
+            pushedCount += successfulResults.length;
+            log.info(`✅ Batch ${batchNum} completed: ${successfulResults.length}/${chunk.length} successful | Pushed ${successfulResults.length} to dataset`);
+        } else {
+            log.info(`⚠️ Batch ${batchNum} completed: 0/${chunk.length} successful`);
+        }
 
         // Human-like delay between batches
-        if (i + DETAIL_PAGE_CONCURRENCY < items.length) {
+        if (i + DETAIL_PAGE_CONCURRENCY < items.length && currentTotal + pushedCount < targetTotal) {
             const delay = 1000 + Math.random() * 1000;
             await new Promise(r => setTimeout(r, delay));
         }
     }
 
-    log.info(`📊 Total detail fetching: ${results.length}/${items.length} successful`);
-    return results;
+    log.info(`📊 Total detail fetching: ${pushedCount} products pushed to dataset`);
+    return { count: pushedCount };
 }
 
 async function fetchProductDetails(listingItem, cookies, proxyUrl) {
