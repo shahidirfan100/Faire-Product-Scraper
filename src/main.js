@@ -228,17 +228,7 @@ async function main() {
         navigationTimeoutSecs: 60,
 
         browserPoolOptions: {
-            useFingerprints: true,
-            fingerprintOptions: {
-                fingerprintGeneratorOptions: {
-                    browsers: [
-                        { name: 'firefox' }
-                    ],
-                    operatingSystems: ['windows', 'macos', 'linux'],
-                    devices: ['desktop'],
-                    locales: ['en-US', 'en'],
-                },
-            },
+            useFingerprints: false,
         },
 
         preNavigationHooks: [async ({ page, context }) => {
