@@ -3,91 +3,108 @@
   "fields": {
     "productName": {
       "title": "Product Name",
-      "type": "string"
+      "type": "string",
+      "description": "Name of the product"
     },
     "brandName": {
       "title": "Brand Name",
-      "type": "string"
+      "type": "string",
+      "description": "Name of the brand"
     },
     "brandUrl": {
       "title": "Brand URL",
-      "type": "string"
+      "type": "string",
+      "description": "URL of the brand page"
     },
     "productUrl": {
       "title": "Product URL",
-      "type": "string"
+      "type": "string",
+      "description": "URL of the product page"
     },
     "imageUrl": {
       "title": "Image URL",
-      "type": "string"
+      "type": "string",
+      "description": "URL of the product image"
     },
     "wholesalePrice": {
       "title": "Wholesale Price",
-      "type": "string"
+      "type": "string",
+      "description": "Wholesale price of the product"
     },
     "msrp": {
       "title": "MSRP",
-      "type": "string"
-    },
-    "discount": {
-      "title": "Discount",
-      "type": "string"
+      "type": "string",
+      "description": "Manufacturer's suggested retail price"
     },
     "isBestseller": {
       "title": "Bestseller",
-      "type": "boolean"
+      "type": "boolean",
+      "description": "Whether the product is a bestseller"
     },
     "isProvenSuccess": {
       "title": "Proven Success",
-      "type": "boolean"
+      "type": "boolean",
+      "description": "Whether the product has proven success"
     },
     "isNew": {
       "title": "New Product",
-      "type": "boolean"
-    },
-    "currency": {
-      "title": "Currency",
-      "type": "string"
+      "type": "boolean",
+      "description": "Whether the product is new"
     },
     "description": {
       "title": "Description",
-      "type": "string"
+      "type": "string",
+      "description": "Product description"
     },
     "sku": {
       "title": "SKU",
-      "type": "string"
+      "type": "string",
+      "description": "Stock keeping unit"
     },
     "madeIn": {
       "title": "Made In",
-      "type": "string"
+      "type": "string",
+      "description": "Country where the product is made"
     },
     "delivery": {
       "title": "Delivery Info",
-      "type": "string"
+      "type": "string",
+      "description": "Delivery information"
     },
     "minimumOrder": {
       "title": "Minimum Order",
-      "type": "string"
+      "type": "string",
+      "description": "Minimum order quantity"
     },
     "casePackQuantity": {
       "title": "Case Pack Quantity",
-      "type": "string"
+      "type": "string",
+      "description": "Quantity per case pack"
     },
     "dimensions": {
       "title": "Dimensions",
-      "type": "string"
+      "type": "string",
+      "description": "Product dimensions"
     },
     "materials": {
       "title": "Materials",
-      "type": "string"
+      "type": "string",
+      "description": "Materials used in the product"
+    },
+    "color": {
+      "title": "Color",
+      "type": "string",
+      "description": "Product color"
     },
     "_scrapedAt": {
       "title": "Scraped At",
-      "type": "string"
+      "type": "string",
+      "description": "Timestamp when the product was scraped"
     },
     "_detailsFetched": {
       "title": "Details Fetched",
-      "type": "boolean"
+      "type": "boolean",
+      "description": "Whether detailed product information was fetched"
     }
   },
   "views": {
@@ -102,6 +119,7 @@
           "description",
           "sku",
           "madeIn",
+          "color",
           "isBestseller",
           "imageUrl",
           "productUrl"
@@ -136,6 +154,10 @@
           },
           "madeIn": {
             "label": "Made In",
+            "format": "text"
+          },
+          "color": {
+            "label": "Color",
             "format": "text"
           },
           "isBestseller": {
