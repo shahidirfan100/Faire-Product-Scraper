@@ -49,9 +49,45 @@
       "title": "Currency",
       "type": "string"
     },
+    "description": {
+      "title": "Description",
+      "type": "string"
+    },
+    "sku": {
+      "title": "SKU",
+      "type": "string"
+    },
+    "madeIn": {
+      "title": "Made In",
+      "type": "string"
+    },
+    "delivery": {
+      "title": "Delivery Info",
+      "type": "string"
+    },
+    "minimumOrder": {
+      "title": "Minimum Order",
+      "type": "string"
+    },
+    "casePackQuantity": {
+      "title": "Case Pack Quantity",
+      "type": "string"
+    },
+    "dimensions": {
+      "title": "Dimensions",
+      "type": "string"
+    },
+    "materials": {
+      "title": "Materials",
+      "type": "string"
+    },
     "_scrapedAt": {
       "title": "Scraped At",
       "type": "string"
+    },
+    "_detailsFetched": {
+      "title": "Details Fetched",
+      "type": "boolean"
     }
   },
   "views": {
@@ -63,7 +99,9 @@
           "brandName",
           "wholesalePrice",
           "msrp",
-          "discount",
+          "description",
+          "sku",
+          "madeIn",
           "isBestseller",
           "imageUrl",
           "productUrl"
@@ -88,8 +126,16 @@
             "label": "MSRP",
             "format": "text"
           },
-          "discount": {
-            "label": "Discount",
+          "description": {
+            "label": "Description",
+            "format": "text"
+          },
+          "sku": {
+            "label": "SKU",
+            "format": "text"
+          },
+          "madeIn": {
+            "label": "Made In",
             "format": "text"
           },
           "isBestseller": {
