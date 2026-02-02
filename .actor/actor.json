@@ -1,7 +1,7 @@
 {
   "actorSpecification": 1,
   "name": "faire-product-scraper",
-  "version": "1.0.0",
+  "version": "1.0",
   "buildTag": "latest",
   "dockerfile": "../Dockerfile",
   "readme": "../README.md",

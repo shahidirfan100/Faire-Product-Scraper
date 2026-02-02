@@ -1,6 +1,6 @@
 {
   "name": "faire-product-scraper",
-  "version": "1.0.0",
+  "version": "1.0",
   "description": "Faire Product Scraper - Extract wholesale products, brand information, and pricing (requires login/cookies) from Faire.com using a stealthy hybrid approach.",
   "type": "module",
   "dependencies": {
