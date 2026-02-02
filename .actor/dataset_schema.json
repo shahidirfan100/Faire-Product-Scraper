@@ -1,111 +1,27 @@
 {
   "actorSpecification": 1,
   "fields": {
-    "productName": {
-      "title": "Product Name",
-      "type": "string",
-      "description": "Name of the product"
-    },
-    "brandName": {
-      "title": "Brand Name",
-      "type": "string",
-      "description": "Name of the brand"
-    },
-    "brandUrl": {
-      "title": "Brand URL",
-      "type": "string",
-      "description": "URL of the brand page"
-    },
-    "productUrl": {
-      "title": "Product URL",
-      "type": "string",
-      "description": "URL of the product page"
-    },
-    "imageUrl": {
-      "title": "Image URL",
-      "type": "string",
-      "description": "URL of the product image"
-    },
-    "wholesalePrice": {
-      "title": "Wholesale Price",
-      "type": "string",
-      "description": "Wholesale price of the product"
-    },
-    "msrp": {
-      "title": "MSRP",
-      "type": "string",
-      "description": "Manufacturer's suggested retail price"
-    },
-    "isBestseller": {
-      "title": "Bestseller",
-      "type": "boolean",
-      "description": "Whether the product is a bestseller"
-    },
-    "isProvenSuccess": {
-      "title": "Proven Success",
-      "type": "boolean",
-      "description": "Whether the product has proven success"
-    },
-    "isNew": {
-      "title": "New Product",
-      "type": "boolean",
-      "description": "Whether the product is new"
-    },
-    "description": {
-      "title": "Description",
-      "type": "string",
-      "description": "Product description"
-    },
-    "sku": {
-      "title": "SKU",
-      "type": "string",
-      "description": "Stock keeping unit"
-    },
-    "madeIn": {
-      "title": "Made In",
-      "type": "string",
-      "description": "Country where the product is made"
-    },
-    "delivery": {
-      "title": "Delivery Info",
-      "type": "string",
-      "description": "Delivery information"
-    },
-    "minimumOrder": {
-      "title": "Minimum Order",
-      "type": "string",
-      "description": "Minimum order quantity"
-    },
-    "casePackQuantity": {
-      "title": "Case Pack Quantity",
-      "type": "string",
-      "description": "Quantity per case pack"
-    },
-    "dimensions": {
-      "title": "Dimensions",
-      "type": "string",
-      "description": "Product dimensions"
-    },
-    "materials": {
-      "title": "Materials",
-      "type": "string",
-      "description": "Materials used in the product"
-    },
-    "color": {
-      "title": "Color",
-      "type": "string",
-      "description": "Product color"
-    },
-    "_scrapedAt": {
-      "title": "Scraped At",
-      "type": "string",
-      "description": "Timestamp when the product was scraped"
-    },
-    "_detailsFetched": {
-      "title": "Details Fetched",
-      "type": "boolean",
-      "description": "Whether detailed product information was fetched"
-    }
+    "productName": "string",
+    "brandName": "string",
+    "brandUrl": "string",
+    "productUrl": "string",
+    "imageUrl": "string",
+    "wholesalePrice": "string",
+    "msrp": "string",
+    "isBestseller": "boolean",
+    "isProvenSuccess": "boolean",
+    "isNew": "boolean",
+    "description": "string",
+    "sku": "string",
+    "madeIn": "string",
+    "delivery": "string",
+    "minimumOrder": "string",
+    "casePackQuantity": "string",
+    "dimensions": "string",
+    "materials": "string",
+    "color": "string",
+    "_scrapedAt": "string",
+    "_detailsFetched": "boolean"
   },
   "views": {
     "overview": {
