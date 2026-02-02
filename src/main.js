@@ -18,11 +18,8 @@ const USER_AGENTS = [
 
 const getRandomUserAgent = () => USER_AGENTS[Math.floor(Math.random() * USER_AGENTS.length)];
 
-let hasLoggedDebug = false;
-
 // Extract product details directly from script content using regex patterns
 function extractProductDetailsFromScript(scriptContent) {
-    console.log('🔍 Starting regex extraction from script content');
     const details = [];
     
     // Look for attribute patterns in the script content
@@ -40,7 +37,6 @@ function extractProductDetailsFromScript(scriptContent) {
     
     patterns.forEach((pattern, idx) => {
         const matches = [...scriptContent.matchAll(pattern)];
-        console.log(`Pattern ${idx} found ${matches.length} matches`);
         matches.forEach(match => {
             const name = match[1];
             const value = match[2];
@@ -49,14 +45,12 @@ function extractProductDetailsFromScript(scriptContent) {
                 const cleanName = name.replace(/\\"/g, '"').trim();
                 const cleanValue = value.replace(/\\"/g, '"').trim();
                 details.push(`${cleanName}: ${cleanValue}`);
-                console.log(`  ✓ Extracted: ${cleanName}: ${cleanValue}`);
             }
         });
     });
     
-    console.log(`📊 Regex extraction completed: ${details.length} details found`);
     return details;
-}
+} 
 
 function normalizeProductRecord(p) {
     if (!p || typeof p !== 'object') return null;
@@ -168,8 +162,7 @@ function setupNetworkCapture(page) {
             // Check response status
             const status = response.status();
             if (status !== 200) {
-                log.debug(`Non-200 status (${status}) for ${url}`);
-                return;
+                // log.debug(`Non-200 status (${status}) for ${url}`);
             }
 
             const contentType = response.headers()['content-type'] || '';
@@ -179,7 +172,7 @@ function setupNetworkCapture(page) {
             const products = extractProductsFromPayload(json);
 
             if (products.length === 0) {
-                log.debug(`No products found in response from ${url}`);
+                // log.debug(`No products found in response from ${url}`);
                 return;
             }
 
@@ -198,7 +191,7 @@ function setupNetworkCapture(page) {
             }
         } catch (e) {
             // Silent fail for non-critical errors
-            log.debug(`Network capture error: ${e.message}`);
+            // log.debug(`Network capture error: ${e.message}`);
         }
     });
 }
@@ -235,8 +228,6 @@ async function main() {
             const path = await import('path');
             const inputPath = path.resolve('INPUT.json');
             const inputJson = fs.readFileSync(inputPath, 'utf8');
-            log.info('📄 Raw INPUT.json content length:', inputJson.length);
-            log.info('📄 First 100 chars:', inputJson.substring(0, 100));
             input = JSON.parse(inputJson);
             log.info('✅ Loaded input using fs.readFileSync');
         } catch (e2) {
@@ -360,17 +351,17 @@ async function main() {
 
             log.info(`Processing listing: ${request.url}`);
 
-            // Wait for page load and initial API calls
-            await page.waitForTimeout(3000);
+            // Wait briefly for page load and initial API calls
+            await page.waitForTimeout(800);
 
-            // Scroll to trigger more API calls
-            for (let i = 0; i < 3; i++) {
+            // Minimal scroll to trigger API calls
+            for (let i = 0; i < 1; i++) {
                 await autoScroll(page);
-                await page.waitForTimeout(1500);
+                await page.waitForTimeout(500);
             }
 
-            // Give network listeners time to collect final responses
-            await page.waitForTimeout(1500);
+            // Give network listeners a short time to collect final responses
+            await page.waitForTimeout(500);
 
             const capturedFromNetwork = page._capturedProducts || [];
             log.info(`✅ Captured ${capturedFromNetwork.length} products from API interception`);
@@ -609,7 +600,7 @@ async function fetchDetailsInBatches(items, cookies, proxyUrl, currentTotal, tar
         }
 
         if (i + DETAIL_PAGE_CONCURRENCY < items.length) {
-            await new Promise(r => setTimeout(r, 1000 + Math.random() * 1000));
+            await new Promise(r => setTimeout(r, 200 + Math.random() * 200));
         }
     }
 
@@ -621,7 +612,7 @@ async function fetchProductDetails(listingItem, cookies, proxyUrl) {
     try {
         const cookieHeader = cookies?.map(c => `${c.name}=${c.value}`).join('; ') || '';
 
-        log.debug(`Fetching details for: ${listingItem.productUrl}`);
+        // log.debug(`Fetching details for: ${listingItem.productUrl}`);
 
         const response = await gotScraping({
             url: listingItem.productUrl,
@@ -653,7 +644,7 @@ async function fetchProductDetails(listingItem, cookies, proxyUrl) {
             for (const script of scripts) {
                 const content = $(script).html();
                 if (content && content.includes('self.__next_f.push') && content.includes('product_information_section_groups')) {
-                    log.debug('Found flight data with product information');
+                    // Found flight data with product information (debug suppressed)
                     
                     // Extract attributes directly using regex on the escaped content
                     // Pattern matches: \"attribute\":{\"name\":{\"translated\":\"NAME\"},\"value\":{\"translated\":\"VALUE\"}}
@@ -767,20 +758,20 @@ async function fetchProductDetails(listingItem, cookies, proxyUrl) {
                         detailsSection.push(`Ships from: ${product.importShipmentInfo}`);
                     }
                     
-                    log.debug(`Extracted ${detailsSection.length} details from product data`);
+                    // log.debug(`Extracted ${detailsSection.length} details from product data`);
                 } else {
-                    log.debug('Product not found in parsed data');
+                    // log.debug('Product not found in parsed data');
                 }
             } catch (e) {
                 log.warning(`Failed to parse __NEXT_DATA__: ${e.message}`);
             }
         } else {
-            log.debug('No __NEXT_DATA__ found in any format');
+            // log.debug('No __NEXT_DATA__ found in any format');
         }
 
         // === FALLBACK: Extract from HTML text if JSON parsing failed ===
         if (detailsSection.length === 0) {
-            log.debug('Attempting fallback extraction from HTML text');
+            // log.debug('Attempting fallback extraction from HTML text');
             
             const bodyText = $('body').text();
             
@@ -805,7 +796,7 @@ async function fetchProductDetails(listingItem, cookies, proxyUrl) {
                     if (keyMatch && keyMatch[1] && value.length > 0 && value.length < 100) { // Sanity check
                         const key = keyMatch[1];
                         detailsSection.push(`${key}: ${value}`);
-                        log.debug(`Found via JSON pattern: ${key}: ${value}`);
+                        // log.debug(`Found via JSON pattern: ${key}: ${value}`);
                     }
                 }
             });
@@ -831,7 +822,7 @@ async function fetchProductDetails(listingItem, cookies, proxyUrl) {
                             if (keyMatch && keyMatch[1]) {
                                 const key = keyMatch[1];
                                 detailsSection.push(`${key}: ${value}`);
-                                log.debug(`Found via text pattern: ${key}: ${value}`);
+                                // log.debug(`Found via text pattern: ${key}: ${value}`);
                             }
                         }
                     }
@@ -957,7 +948,7 @@ async function fetchProductDetails(listingItem, cookies, proxyUrl) {
             _detailsFetched: true
         };
 
-        log.debug(`✅ Details extracted for ${productName} - SKU: ${sku || 'N/A'}, Made in: ${madeIn || 'N/A'}`);
+        // log.debug(`✅ Details extracted for ${productName} - SKU: ${sku || 'N/A'}, Made in: ${madeIn || 'N/A'}`);
 
         return completeProduct;
 
