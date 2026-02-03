@@ -4,7 +4,7 @@
   "resultsWanted": 20,
   "cookies": [],
   "proxyConfiguration": {
-    "useApifyProxy": true,
+    "useApifyProxy": false,
     "apifyProxyGroups": [
       "RESIDENTIAL"
     ]

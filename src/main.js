@@ -5,23 +5,43 @@ import { gotScraping } from 'got-scraping';
 import * as cheerio from 'cheerio';
 
 // CONFIGURATION (defaults, can be overridden by input)
-const DETAIL_PAGE_CONCURRENCY = 10;
+const DETAIL_PAGE_CONCURRENCY = 15; // Increased for faster detail fetching
 const PROCESSED_URLS = new Set();
 
 const USER_AGENTS = [
     'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:123.0) Gecko/20100101 Firefox/123.0',
-    'Mozilla/5.0 (Macintosh; Intel Mac OS X 14.7; rv:123.0) Gecko/20100101 Firefox/123.0',
-    'Mozilla/5.0 (X11; Linux x86_64; rv:123.0) Gecko/20100101 Firefox/123.0',
     'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:124.0) Gecko/20100101 Firefox/124.0',
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:125.0) Gecko/20100101 Firefox/125.0',
+    'Mozilla/5.0 (Windows NT 11.0; Win64; x64; rv:123.0) Gecko/20100101 Firefox/123.0',
+    'Mozilla/5.0 (Macintosh; Intel Mac OS X 14.7; rv:123.0) Gecko/20100101 Firefox/123.0',
     'Mozilla/5.0 (Macintosh; Intel Mac OS X 14.2; rv:124.0) Gecko/20100101 Firefox/124.0',
+    'Mozilla/5.0 (Macintosh; Intel Mac OS X 14.3; rv:125.0) Gecko/20100101 Firefox/125.0',
+    'Mozilla/5.0 (X11; Linux x86_64; rv:123.0) Gecko/20100101 Firefox/123.0',
+    'Mozilla/5.0 (X11; Linux x86_64; rv:124.0) Gecko/20100101 Firefox/124.0',
+    'Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:123.0) Gecko/20100101 Firefox/123.0',
+    'Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:124.0) Gecko/20100101 Firefox/124.0',
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:122.0) Gecko/20100101 Firefox/122.0',
+    'Mozilla/5.0 (Macintosh; Intel Mac OS X 13.6; rv:122.0) Gecko/20100101 Firefox/122.0',
+    'Mozilla/5.0 (X11; Fedora; Linux x86_64; rv:123.0) Gecko/20100101 Firefox/123.0',
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:121.0) Gecko/20100101 Firefox/121.0',
 ];
 
 const getRandomUserAgent = () => USER_AGENTS[Math.floor(Math.random() * USER_AGENTS.length)];
 
+const VIEWPORTS = [
+    { width: 1366, height: 768 },
+    { width: 1440, height: 900 },
+    { width: 1536, height: 864 },
+    { width: 1920, height: 1080 },
+    { width: 1600, height: 900 },
+];
+
+const getRandomViewport = () => VIEWPORTS[Math.floor(Math.random() * VIEWPORTS.length)];
+
 // Extract product details directly from script content using regex patterns
 function extractProductDetailsFromScript(scriptContent) {
     const details = [];
-    
+
     // Look for attribute patterns in the script content
     // These patterns are based on the actual structure we found in the debug output
     const patterns = [
@@ -34,7 +54,7 @@ function extractProductDetailsFromScript(scriptContent) {
         // Pattern for simple name with translated value
         /"name"\\?:\s*"([^"]+)"\s*,\s*"value"\\?:\s*\{\s*"translated"\\?:\s*"([^"]+)"\s*\}/g
     ];
-    
+
     patterns.forEach((pattern, idx) => {
         const matches = [...scriptContent.matchAll(pattern)];
         matches.forEach(match => {
@@ -48,22 +68,22 @@ function extractProductDetailsFromScript(scriptContent) {
             }
         });
     });
-    
+
     return details;
-} 
+}
 
 function normalizeProductRecord(p) {
-    if (!p || typeof p !== 'object') return null;
-
-    // DEBUG: Log the first raw product object absolutely reliably
-    if (!hasLoggedDebug) {
-        console.log('🐛 [DEBUG] FIRST RAW PRODUCT INPUT:', JSON.stringify(p, null, 2));
-        hasLoggedDebug = true;
+    if (!p || typeof p !== 'object') {
+        log.debug('[Normalize] Invalid product object');
+        return null;
     }
 
     // Try all possible ID fields
     const token = p.token || p.id || p.productToken || p.product_token || p.slug;
-    if (!token) return null;
+    if (!token) {
+        log.warning(`[Normalize] No token found. Available keys: ${Object.keys(p).join(', ')}`);
+        return null;
+    }
 
     // Brand extraction - handle various structures
     const brandObj = p.brand || {};
@@ -127,23 +147,38 @@ function normalizeProductRecord(p) {
 }
 
 function extractProductsFromPayload(payload) {
-    if (!payload || typeof payload !== 'object') return [];
+    if (!payload || typeof payload !== 'object') {
+        log.debug('[Extract] Invalid payload');
+        return [];
+    }
 
     const candidates = [
         // Faire's product_tiles is an array of {product: {...}} objects
-        payload.product_tiles?.map(tile => tile.product),
+        payload.product_tiles?.map(tile => tile.product || tile),
         payload.products,
         payload.results,
         payload?.data?.products,
+        payload?.data?.product_tiles?.map(tile => tile.product || tile),
         payload?.data?.searchProducts?.products,
         payload?.data?.browseProducts?.products,
         payload?.data?.search?.products,
     ].filter(Array.isArray);
 
+    log.info(`[Extract] Found ${candidates.length} candidate arrays`);
+    candidates.forEach((arr, idx) => {
+        log.info(`[Extract] Candidate ${idx}: ${arr?.length || 0} items`);
+    });
+
     const flattened = candidates.flat();
-    return flattened
+    log.info(`[Extract] Flattened to ${flattened.length} total items`);
+
+    const normalized = flattened
         .map(normalizeProductRecord)
         .filter(Boolean);
+
+    log.info(`[Extract] Normalized to ${normalized.length} valid products`);
+
+    return normalized;
 }
 
 function setupNetworkCapture(page) {
@@ -157,19 +192,55 @@ function setupNetworkCapture(page) {
 
             // Only process XHR/Fetch requests matching our patterns
             if (!['xhr', 'fetch'].includes(resourceType)) return;
+
+            // Debug: Log all XHR/Fetch requests
+            log.debug(`[Network] ${resourceType}: ${url}`);
+
             if (!SEARCH_URL_PATTERNS.some((rx) => rx.test(url))) return;
+
+            log.info(`[Network Match] Found matching request: ${url}`);
 
             // Check response status
             const status = response.status();
             if (status !== 200) {
-                // log.debug(`Non-200 status (${status}) for ${url}`);
+                log.warning(`Non-200 status (${status}) for ${url}`);
+                return;
             }
 
             const contentType = response.headers()['content-type'] || '';
-            if (!contentType.includes('json')) return;
+            if (!contentType.includes('json')) {
+                log.warning(`Non-JSON response for ${url}`);
+                return;
+            }
 
             const json = await response.json();
+
+            // Debug: Log the response structure in detail
+            log.info(`[API Response] URL: ${url}`);
+            log.info(`[API Response] Top-level keys: ${Object.keys(json).join(', ')}`);
+
+            // Check for nested structures
+            if (json.data) {
+                log.info(`[API Response] json.data keys: ${Object.keys(json.data).join(', ')}`);
+            }
+            if (json.result) {
+                log.info(`[API Response] json.result keys: ${Object.keys(json.result).join(', ')}`);
+            }
+
+            // Log array lengths and types
+            if (json.product_tiles) {
+                log.info(`[API Response] json.product_tiles is array: ${Array.isArray(json.product_tiles)}, length: ${json.product_tiles?.length || 0}`);
+            }
+            if (json.products) {
+                log.info(`[API Response] json.products is array: ${Array.isArray(json.products)}, length: ${json.products?.length || 0}`);
+            }
+            if (json.data?.product_tiles) {
+                log.info(`[API Response] json.data.product_tiles is array: ${Array.isArray(json.data.product_tiles)}, length: ${json.data.product_tiles?.length || 0}`);
+            }
+
             const products = extractProductsFromPayload(json);
+
+            log.info(`[API Response] Extracted ${products.length} products from response`);
 
             if (products.length === 0) {
                 // log.debug(`No products found in response from ${url}`);
@@ -190,17 +261,55 @@ function setupNetworkCapture(page) {
                 log.info(`📦 Captured ${addedCount} new products from API (${page._capturedProducts.length} total)`);
             }
         } catch (e) {
-            // Silent fail for non-critical errors
-            // log.debug(`Network capture error: ${e.message}`);
+            log.debug(`Network capture error for ${response.url()}: ${e.message}`);
         }
     });
 }
 
 const STEALTH_SCRIPT = () => {
+    // Enhanced stealth - remove webdriver detection
     Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
-    Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5] });
-    window.chrome = { runtime: {} };
+    delete navigator.__proto__.webdriver;
+
+    // Realistic plugins
+    Object.defineProperty(navigator, 'plugins', {
+        get: () => [
+            { name: 'PDF Viewer', filename: 'internal-pdf-viewer' },
+            { name: 'Chrome PDF Viewer', filename: 'internal-pdf-viewer' },
+            { name: 'Chromium PDF Viewer', filename: 'internal-pdf-viewer' },
+            { name: 'Microsoft Edge PDF Viewer', filename: 'internal-pdf-viewer' },
+            { name: 'WebKit built-in PDF', filename: 'internal-pdf-viewer' }
+        ]
+    });
+
+    // Chrome runtime
+    window.chrome = { runtime: {}, loadTimes: function () { }, csi: function () { } };
+
+    // Languages
     Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'] });
+
+    // Hardware concurrency (randomize between 4-16 cores)
+    Object.defineProperty(navigator, 'hardwareConcurrency', {
+        get: () => Math.floor(Math.random() * 13) + 4
+    });
+
+    // Device memory (randomize between 4-8 GB)
+    Object.defineProperty(navigator, 'deviceMemory', {
+        get: () => [4, 8][Math.floor(Math.random() * 2)]
+    });
+
+    // Platform
+    Object.defineProperty(navigator, 'platform', {
+        get: () => ['Win32', 'MacIntel', 'Linux x86_64'][Math.floor(Math.random() * 3)]
+    });
+
+    // WebGL vendor/renderer spoofing
+    const getParameter = WebGLRenderingContext.prototype.getParameter;
+    WebGLRenderingContext.prototype.getParameter = function (parameter) {
+        if (parameter === 37445) return 'Intel Inc.';
+        if (parameter === 37446) return 'Intel Iris OpenGL Engine';
+        return getParameter.apply(this, arguments);
+    };
 };
 
 const SEARCH_URL_PATTERNS = [
@@ -249,6 +358,13 @@ async function main() {
         cookiesCount: input.cookies?.length || 0
     });
 
+    // Disable proxy for local development (Apify proxy not available locally)
+    const isOnApify = await Actor.isAtHome();
+    if (!isOnApify && input.proxyConfiguration?.useApifyProxy) {
+        log.warning('🔧 Running locally - disabling Apify proxy for local development');
+        input.proxyConfiguration.useApifyProxy = false;
+    }
+
     let {
         startUrl,
         searchQuery,
@@ -282,7 +398,7 @@ async function main() {
         launchContext: {
             launcher: firefox,
             launchOptions: {
-                headless: true,
+                headless: true, // Always headless
             },
             userAgent: getRandomUserAgent(),
         },
@@ -293,7 +409,7 @@ async function main() {
         sessionPoolOptions: {
             maxPoolSize: 10,
             sessionOptions: {
-                maxUsageCount: 15,
+                maxUsageCount: 10, // Reduced from 15 to rotate sessions faster
                 maxErrorScore: 2,
             },
         },
@@ -303,7 +419,7 @@ async function main() {
         preNavigationHooks: [async ({ page, context }) => {
             setupNetworkCapture(page);
 
-            // Enhanced resource blocking for speed and stealth
+            // Enhanced resource blocking for speed and stealth (enabled everywhere)
             await page.route('**/*', (route) => {
                 const url = route.request().url();
                 const type = route.request().resourceType();
@@ -319,13 +435,20 @@ async function main() {
                     'amplitude',
                     'segment.com',
                     'mixpanel',
+                    'intercom',
+                    'fullstory',
+                    'heap-api',
+                    'logrocket',
                     '.woff',
+                    '.woff2',
+                    '.ttf',
                     '.svg',
                     '.jpg',
                     '.jpeg',
                     '.png',
                     '.gif',
                     '.webp',
+                    '.ico',
                 ];
 
                 if (blockedTypes.includes(type) || blockedPatterns.some(pattern => url.includes(pattern))) {
@@ -340,7 +463,12 @@ async function main() {
                 await page.context().addCookies(cookies);
             }
 
-            await page.setViewportSize({ width: 1440, height: 900 });
+            // Randomize viewport for stealth
+            const viewport = getRandomViewport();
+            await page.setViewportSize(viewport);
+
+            // Inject stealth script
+            await page.addInitScript(STEALTH_SCRIPT);
         }],
 
         async requestHandler({ page, request, proxyInfo }) {
@@ -351,17 +479,36 @@ async function main() {
 
             log.info(`Processing listing: ${request.url}`);
 
-            // Wait briefly for page load and initial API calls
-            await page.waitForTimeout(800);
+            // Progressive scrolling: scroll and check product count iteratively
+            let scrollRound = 0;
+            const maxScrollRounds = Math.ceil(RESULTS_WANTED / 60) + 1; // Estimate rounds needed
 
-            // Minimal scroll to trigger API calls
-            for (let i = 0; i < 1; i++) {
-                await autoScroll(page);
+            while (scrollRound < maxScrollRounds && totalCollected < RESULTS_WANTED) {
+                scrollRound++;
+                log.info(`📜 Scroll round ${scrollRound}/${maxScrollRounds} - Currently have ${page._capturedProducts?.length || 0} products`);
+
+                // Scroll to trigger more API calls
+                await autoScroll(page, RESULTS_WANTED);
+
+                // Wait for network responses to complete
                 await page.waitForTimeout(500);
-            }
 
-            // Give network listeners a short time to collect final responses
-            await page.waitForTimeout(500);
+                const currentCount = page._capturedProducts?.length || 0;
+
+                // If we have enough products, stop scrolling
+                if (currentCount >= RESULTS_WANTED) {
+                    log.info(`✅ Captured ${currentCount} products, stopping scroll`);
+                    break;
+                }
+
+                // If no new products after scrolling, we've reached the end
+                if (scrollRound > 1 && currentCount === (page._lastProductCount || 0)) {
+                    log.info(`⚠️ No new products after scroll round ${scrollRound}, stopping`);
+                    break;
+                }
+
+                page._lastProductCount = currentCount;
+            }
 
             const capturedFromNetwork = page._capturedProducts || [];
             log.info(`✅ Captured ${capturedFromNetwork.length} products from API interception`);
@@ -600,7 +747,8 @@ async function fetchDetailsInBatches(items, cookies, proxyUrl, currentTotal, tar
         }
 
         if (i + DETAIL_PAGE_CONCURRENCY < items.length) {
-            await new Promise(r => setTimeout(r, 200 + Math.random() * 200));
+            // Randomized delay between batches (reduced from 200-400ms to 100-200ms)
+            await new Promise(r => setTimeout(r, 100 + Math.random() * 100));
         }
     }
 
@@ -637,7 +785,7 @@ async function fetchProductDetails(listingItem, cookies, proxyUrl) {
         // === EXTRACT FROM __NEXT_DATA__ (Primary Method) ===
         let nextDataScript = $('#__NEXT_DATA__').html();
         let detailsSection = [];
-        
+
         // If __NEXT_DATA__ is not found, try to find it in self.__next_f.push() format
         if (!nextDataScript) {
             const scripts = $('script').toArray();
@@ -645,18 +793,18 @@ async function fetchProductDetails(listingItem, cookies, proxyUrl) {
                 const content = $(script).html();
                 if (content && content.includes('self.__next_f.push') && content.includes('product_information_section_groups')) {
                     // Found flight data with product information (debug suppressed)
-                    
+
                     // Extract attributes directly using regex on the escaped content
                     // Pattern matches: \"attribute\":{\"name\":{\"translated\":\"NAME\"},\"value\":{\"translated\":\"VALUE\"}}
                     const attributePattern = /\\"attribute\\":\{\\"name\\":\{\\"translated\\":\\"([^"]+)\\"\},\\"value\\":\{\\"translated\\":\\"([^"]+)\\"\}\}/g;
                     let match;
-                    
+
                     while ((match = attributePattern.exec(content)) !== null) {
                         const name = match[1];
                         const value = match[2];
                         detailsSection.push(`${name}: ${value}`);
                     }
-                    
+
                     if (detailsSection.length > 0) {
                         log.debug(`Extracted ${detailsSection.length} product details via regex`);
                         break;
@@ -664,11 +812,11 @@ async function fetchProductDetails(listingItem, cookies, proxyUrl) {
                 }
             }
         }
-        
+
         if (nextDataScript) {
             try {
                 const data = JSON.parse(nextDataScript);
-                
+
                 // Look for product data in multiple possible locations
                 let product = null;
                 const possiblePaths = [
@@ -694,17 +842,17 @@ async function fetchProductDetails(listingItem, cookies, proxyUrl) {
                         }
                         return obj?.[key];
                     }, data);
-                    
+
                     if (product && typeof product === 'object' && product.token) {
                         break;
                     }
                 }
-                
+
                 if (product) {
                     // Extract structured details from the product object
-                    const detailsSections = product.details?.product_information_section_groups || 
-                                          product.details?.attribute_tags || [];
-                    
+                    const detailsSections = product.details?.product_information_section_groups ||
+                        product.details?.attribute_tags || [];
+
                     // Handle different data structures
                     if (Array.isArray(detailsSections)) {
                         detailsSections.forEach(group => {
@@ -731,7 +879,7 @@ async function fetchProductDetails(listingItem, cookies, proxyUrl) {
                             }
                         });
                     }
-                    
+
                     // Check for option-level entries (new structure)
                     if (product.details?.product_information_section_groups) {
                         product.details.product_information_section_groups.forEach(group => {
@@ -752,12 +900,12 @@ async function fetchProductDetails(listingItem, cookies, proxyUrl) {
                             }
                         });
                     }
-                    
+
                     // Also check for direct properties
                     if (product.importShipmentInfo) {
                         detailsSection.push(`Ships from: ${product.importShipmentInfo}`);
                     }
-                    
+
                     // log.debug(`Extracted ${detailsSection.length} details from product data`);
                 } else {
                     // log.debug('Product not found in parsed data');
@@ -772,9 +920,9 @@ async function fetchProductDetails(listingItem, cookies, proxyUrl) {
         // === FALLBACK: Extract from HTML text if JSON parsing failed ===
         if (detailsSection.length === 0) {
             // log.debug('Attempting fallback extraction from HTML text');
-            
+
             const bodyText = $('body').text();
-            
+
             // Look for the specific JSON-like patterns we found in the debug output
             const jsonPatterns = [
                 /"SKU":\s*"([^"]+)"/,
@@ -786,7 +934,7 @@ async function fetchProductDetails(listingItem, cookies, proxyUrl) {
                 /"Minimum Order":\s*"([^"]+)"/,
                 /"Case Pack":\s*"([^"]+)"/
             ];
-            
+
             jsonPatterns.forEach(pattern => {
                 const match = bodyText.match(pattern);
                 if (match && match[1]) {
@@ -800,7 +948,7 @@ async function fetchProductDetails(listingItem, cookies, proxyUrl) {
                     }
                 }
             });
-            
+
             // If JSON patterns didn't work, try text patterns with better boundaries
             if (detailsSection.length === 0) {
                 const textPatterns = [
@@ -811,7 +959,7 @@ async function fetchProductDetails(listingItem, cookies, proxyUrl) {
                     /\bColor:\s*([^\n\r,}]{1,50}?)(?=\s*["}])/i,
                     /\bShips from:\s*([^\n\r,}]{1,50}?)(?=\s*["}])/i
                 ];
-                
+
                 textPatterns.forEach(pattern => {
                     const match = bodyText.match(pattern);
                     if (match && match[1]) {
@@ -833,24 +981,24 @@ async function fetchProductDetails(listingItem, cookies, proxyUrl) {
         // Helper function to extract detail value by key with multiple variations
         const getDetailValue = (keys) => {
             if (!Array.isArray(keys)) keys = [keys];
-            
+
             for (const key of keys) {
                 const detail = detailsSection.find(d => {
                     const lower = d.toLowerCase();
                     const keyLower = key.toLowerCase();
                     return lower.startsWith(keyLower + ':') || lower.includes(keyLower + ':');
                 });
-                
+
                 if (detail) {
                     return detail.split(':').slice(1).join(':').trim();
                 }
             }
-            
+
             return '';
         };
 
         // === EXTRACT STRUCTURED PRODUCT DETAILS ===
-        
+
         // 1. Description (try multiple selectors)
         const description = $('[data-testid="product-description"]').text().trim()
             || $('div[class*="Description"] p').first().text().trim()
@@ -888,15 +1036,15 @@ async function fetchProductDetails(listingItem, cookies, proxyUrl) {
         // === PRESERVE LISTING DATA WITH FALLBACKS ===
 
         // Brand Name - prefer listing data, fallback to detail page
-        const brandName = listingItem.brandName 
-            || $('[data-testid="brand-name"]').text().trim() 
-            || $('a[href*="/brand/"]').first().text().trim() 
+        const brandName = listingItem.brandName
+            || $('[data-testid="brand-name"]').text().trim()
+            || $('a[href*="/brand/"]').first().text().trim()
             || '';
 
         // Product Name - prefer listing data, fallback to detail page
-        const productName = listingItem.productName 
-            || $('h1').first().text().trim() 
-            || $('[data-testid="product-title"]').text().trim() 
+        const productName = listingItem.productName
+            || $('h1').first().text().trim()
+            || $('[data-testid="product-title"]').text().trim()
             || $('meta[property="og:title"]').attr('content')?.trim()
             || '';
 
@@ -920,16 +1068,16 @@ async function fetchProductDetails(listingItem, cookies, proxyUrl) {
             brandName,
             brandUrl: listingItem.brandUrl || '',
             imageUrl,
-            
+
             // Prices (from listing)
             wholesalePrice,
             msrp,
-            
+
             // Badges (from listing)
             isBestseller: listingItem.isBestseller || false,
             isProvenSuccess: listingItem.isProvenSuccess || false,
             isNew: listingItem.isNew || false,
-            
+
             // Detail page fields (structured data)
             description,
             sku,
@@ -939,10 +1087,10 @@ async function fetchProductDetails(listingItem, cookies, proxyUrl) {
             casePackQuantity,
             dimensions,
             materials,
-            
+
             // Additional product-specific fields
             color,
-            
+
             // Metadata
             _scrapedAt: new Date().toISOString(),
             _detailsFetched: true
@@ -972,22 +1120,29 @@ async function fetchProductDetails(listingItem, cookies, proxyUrl) {
     }
 }
 
-async function autoScroll(page) {
-    await page.evaluate(async () => {
+async function autoScroll(page, resultsWanted = 20) {
+    // Calculate dynamic scroll depth based on results wanted
+    // Faire shows ~60 products per page load, estimate 300px per product
+    const baseScrollDepth = 10000; // Minimum scroll for 20 products
+    const scrollDepth = resultsWanted <= 20 ? baseScrollDepth : Math.min(50000, resultsWanted * 300);
+
+    await page.evaluate(async (maxScroll) => {
         await new Promise((resolve) => {
             let totalHeight = 0;
-            const distance = 400;
+            const distance = 600; // Scroll 600px at a time
             const timer = setInterval(() => {
                 const scrollHeight = document.body.scrollHeight;
                 window.scrollBy(0, distance);
                 totalHeight += distance;
-                if (totalHeight >= scrollHeight - window.innerHeight || totalHeight > 20000) {
+
+                // Stop if reached bottom or max scroll depth
+                if (totalHeight >= scrollHeight - window.innerHeight || totalHeight > maxScroll) {
                     clearInterval(timer);
                     resolve();
                 }
-            }, 150);
+            }, 100); // 100ms interval for smooth scrolling
         });
-    });
+    }, scrollDepth);
 }
 
 main().catch((error) => {
